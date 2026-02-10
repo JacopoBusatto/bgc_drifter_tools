@@ -1,0 +1,10 @@
+numpy
+pandas
+xarray
+netCDF4
+matplotlib
+
+[dev]
+pytest
+ruff
+mypy
