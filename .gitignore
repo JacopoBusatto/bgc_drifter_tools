@@ -22,3 +22,8 @@ Thumbs.db
 data/*
 !data/.gitkeep
 outputs/
+
+# Python packaging artifacts
+*.egg-info/
+dist/
+build/

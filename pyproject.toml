@@ -24,6 +24,8 @@ dev = [
   "ruff",
   "mypy",
   "pyarrow",
+  "scipy",
+  "h5py",
 ]
 
 [tool.setuptools]
