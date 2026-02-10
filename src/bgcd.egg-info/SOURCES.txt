@@ -2,11 +2,7 @@ LICENSE
 README.md
 pyproject.toml
 src/bgcd/__init__.py
-src/bgcd/analysis.py
 src/bgcd/io.py
-src/bgcd/plotting.py
-src/bgcd/preprocess.py
-src/bgcd/qc.py
 src/bgcd.egg-info/PKG-INFO
 src/bgcd.egg-info/SOURCES.txt
 src/bgcd.egg-info/dependency_links.txt

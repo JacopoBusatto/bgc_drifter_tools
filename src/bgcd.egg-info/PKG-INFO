@@ -15,4 +15,5 @@ Provides-Extra: dev
 Requires-Dist: pytest; extra == "dev"
 Requires-Dist: ruff; extra == "dev"
 Requires-Dist: mypy; extra == "dev"
+Requires-Dist: pyarrow; extra == "dev"
 Dynamic: license-file
