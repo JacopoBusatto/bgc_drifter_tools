@@ -1,133 +1,112 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from io import StringIO
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable
 
 import pandas as pd
-import re
+
 
 @dataclass(frozen=True)
-class Chunk:
-    header: str
-    lines: List[str]
-
-
-def _clean_lines(path: str | Path) -> List[str]:
+class SplitResult:
     """
-    Remove empty lines and '</br>' tokens. Does NOT try to interpret columns.
+    Output of the raw CSV splitter.
+
+    chunks: dict platform_id -> raw DataFrame (as parsed with that chunk header)
+    """
+    chunks: dict[str, pd.DataFrame]
+
+
+def _clean_line(line: str) -> str:
+    # remove html junk, strip spaces
+    return line.replace("</br>", "").strip()
+
+
+def split_raw_csv_into_platform_chunks(path: str | Path) -> SplitResult:
+    """
+    Split a multi-header CSV container into per-platform raw DataFrames.
+
+    This handles files like:
+      headerA
+      rows...
+      </br>
+      headerB
+      rows...
+      ...
+
+    Strategy:
+    - read file as text
+    - remove empty lines and '</br>'
+    - detect header lines (currently: lines starting with 'Platform-ID')
+    - for each header block, collect subsequent rows until next header
+    - parse each block with pandas.read_csv(StringIO(block_text))
+    - group by Platform-ID and concatenate across blocks (even if different schemas)
+
+    Notes
+    -----
+    - Output DataFrames are "raw": columns depend on the header block.
+    - Later steps (canonicalization) will normalize names/types.
     """
     text = Path(path).read_text(encoding="utf-8", errors="ignore")
-    out: List[str] = []
-    for ln in text.splitlines():
-        s = ln.strip()
-        if not s:
+    lines = [_clean_line(ln) for ln in text.splitlines()]
+    lines = [ln for ln in lines if ln]  # drop empty
+
+    # Find header indices
+    header_idx: list[int] = [i for i, ln in enumerate(lines) if ln.startswith("Platform-ID")]
+    if not header_idx:
+        raise ValueError("No header lines detected (expected lines starting with 'Platform-ID').")
+
+    # Add sentinel end
+    header_idx.append(len(lines))
+
+    blocks: list[list[str]] = []
+    for i in range(len(header_idx) - 1):
+        start = header_idx[i]
+        end = header_idx[i + 1]
+        block = lines[start:end]
+        # must contain header + at least one row
+        if len(block) >= 2:
+            blocks.append(block)
+
+    # Parse blocks and collect per platform
+    per_pid: dict[str, list[pd.DataFrame]] = {}
+
+    for block in blocks:
+        header = block[0]
+        rows = block[1:]
+
+        # Some exports have trailing commas → pandas creates unnamed columns; ok.
+        csv_text = "\n".join([header, *rows])
+
+        try:
+            df = pd.read_csv(
+                pd.io.common.StringIO(csv_text),
+                skipinitialspace=True,
+                engine="python",
+                on_bad_lines="skip",
+            )
+        except Exception:
+            # skip completely broken blocks
             continue
-        s = s.replace("</br>", "").strip()
-        if not s:
-            continue
-        out.append(s)
-    return out
 
-
-def split_into_chunks(path: str | Path, header_prefix: str = "Platform-ID") -> List[Chunk]:
-    """
-    Split a CSV file into chunks each starting with a header line.
-    We do NOT assume any fixed set of columns beyond the header_prefix.
-    """
-    lines = _clean_lines(path)
-
-    chunks: List[Chunk] = []
-    cur_header: Optional[str] = None
-    cur_lines: List[str] = []
-
-    for ln in lines:
-        if ln.startswith(header_prefix):
-            # flush previous
-            if cur_header is not None and cur_lines:
-                chunks.append(Chunk(header=cur_header, lines=cur_lines))
-            cur_header = ln
-            cur_lines = [ln]
-        else:
-            if cur_header is not None:
-                cur_lines.append(ln)
-
-    if cur_header is not None and cur_lines:
-        chunks.append(Chunk(header=cur_header, lines=cur_lines))
-
-    return chunks
-
-
-def read_chunk_df(chunk: Chunk) -> pd.DataFrame:
-    """
-    Read one chunk into a DataFrame using pandas.
-    Keeps the original column names (stripped).
-    """
-    txt = "\n".join(chunk.lines)
-    df = pd.read_csv(
-        StringIO(txt),
-        skipinitialspace=True,
-        engine="python",
-        on_bad_lines="skip",
-    )
-    df = df.loc[:, ~df.columns.str.contains(r"^Unnamed")].copy()
-    df.columns = [c.strip() for c in df.columns]
-    return df
-
-
-def write_per_platform_from_chunks(
-    chunks: List[Chunk],
-    out_dir: str | Path,
-    base_name: str,
-    fmt: str = "csv",
-) -> None:
-    """
-    For each chunk:
-      - read it as DataFrame
-      - require a 'Platform-ID' column
-      - group by Platform-ID and append to per-platform files
-
-    Output files:
-      out_dir/{base_name}_{platform_id}.csv|parquet
-    """
-    out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-
-    # accumulate frames per platform in memory (simple, ok for your sizes)
-    acc: dict[str, list[pd.DataFrame]] = {}
-
-    for ch in chunks:
-        df = read_chunk_df(ch)
+        # If Platform-ID column missing, skip
         if "Platform-ID" not in df.columns:
-            # skip weird blocks
             continue
 
-        # normalize ID to string
+        # Drop completely empty/garbage columns
+        df = df.loc[:, ~df.columns.str.contains(r"^Unnamed")]
+        df.columns = [c.strip() for c in df.columns]
+
+        # Normalize platform id to string
         df["Platform-ID"] = df["Platform-ID"].astype(str).str.strip()
-        valid = df["Platform-ID"].str.fullmatch(r"\d{10,}")
-        df = df[valid].copy()
-        if df.empty:
-            continue
 
         for pid, g in df.groupby("Platform-ID", sort=False):
-            acc.setdefault(pid, []).append(g)
+            per_pid.setdefault(pid, []).append(g.copy())
 
-    # write
-    for pid, frames in acc.items():
-        big = pd.concat(frames, ignore_index=True, sort=False)
+    # Concatenate lists
+    chunks: dict[str, pd.DataFrame] = {}
+    for pid, parts in per_pid.items():
+        # concat with union of columns (different schemas) → NaN where missing
+        chunks[pid] = pd.concat(parts, ignore_index=True, sort=False)
 
-        # optional: sort if a time column exists
-        for tcol in ("Timestamp(UTC)", "GPS-Timestamp(utc)", "Time", "time"):
-            if tcol in big.columns:
-                big[tcol] = pd.to_datetime(big[tcol], errors="coerce")
-                big = big.sort_values(tcol)
-                break
-
-        base = out / f"{base_name}_{pid}"
-        if fmt == "csv":
-            big.to_csv(base.with_suffix(".csv"), index=False)
-        elif fmt == "parquet":
-            big.to_parquet(base.with_suffix(".parquet"), index=False)
-        else:
-            raise ValueError("fmt must be csv or parquet")
+    return SplitResult(chunks=chunks)

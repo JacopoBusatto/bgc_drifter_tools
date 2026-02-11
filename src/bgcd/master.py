@@ -2,26 +2,35 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable, Iterable
 
 import pandas as pd
 
-from .io import read_drifter_csv, read_wind_csv, merge_drifter_wind
 
-
+# -----------------------------------------------------------------------------
+# Paths & generic per-platform readers
+# -----------------------------------------------------------------------------
 @dataclass(frozen=True)
 class MasterPaths:
-    drifter_csv: str | Path
-    wind_csv: str | Path
-    mat_db_dir: str | Path  # directory containing mat_timeseries_<id>.csv/.parquet
+    drifter_db_dir: str | Path   # contains drifter_<pid>.csv|parquet (canonical)
+    wind_db_dir: str | Path      # contains wind_<pid>.csv|parquet (canonical)
+    mat_db_dir: str | Path       # contains mat_timeseries_<pid>.csv|parquet
+    extra_db_dirs: dict[str, str | Path] | None = None
+    # extra_db_dirs example:
+    # {"oxygen": "C:/.../db_oxygen", "chl": "C:/.../db_chl"}
 
 
-def _read_mat_timeseries(mat_db_dir: str | Path, platform_id: str) -> pd.DataFrame:
+def _read_per_platform(
+    db_dir: str | Path,
+    base_name: str,
+    platform_id: str,
+) -> pd.DataFrame:
     """
-    Read per-platform MAT-derived timeseries from db_mat.
-    Accepts either CSV or Parquet (prefers Parquet if both exist).
+    Read a per-platform file either CSV or Parquet (prefers Parquet if both exist).
+    Expects the filename pattern: {base_name}_{platform_id}.csv|parquet
     """
-    d = Path(mat_db_dir)
-    base = d / f"mat_timeseries_{platform_id}"
+    d = Path(db_dir)
+    base = d / f"{base_name}_{platform_id}"
 
     parquet = base.with_suffix(".parquet")
     csv = base.with_suffix(".csv")
@@ -29,117 +38,203 @@ def _read_mat_timeseries(mat_db_dir: str | Path, platform_id: str) -> pd.DataFra
     if parquet.exists():
         return pd.read_parquet(parquet)
     if csv.exists():
-        return pd.read_csv(csv, parse_dates=["time_utc"])
+        # parse_dates only if present
+        df = pd.read_csv(csv)
+        if "time_utc" in df.columns:
+            df["time_utc"] = pd.to_datetime(df["time_utc"], errors="coerce")
+        return df
 
-    raise FileNotFoundError(f"MAT timeseries not found for {platform_id}: {parquet} or {csv}")
+    raise FileNotFoundError(f"Missing per-platform file for {platform_id}: {parquet} or {csv}")
 
 
-def _merge_asof_per_platform(
+def _ensure_keys(df: pd.DataFrame, platform_id: str) -> pd.DataFrame:
+    """
+    Ensure platform_id and time_utc columns exist and are well-typed.
+    """
+    df = df.copy()
+
+    if "platform_id" not in df.columns:
+        df.insert(0, "platform_id", str(platform_id))
+    df["platform_id"] = df["platform_id"].astype(str).str.strip()
+
+    if "time_utc" not in df.columns:
+        raise ValueError("Expected 'time_utc' column in per-platform DB.")
+    df["time_utc"] = pd.to_datetime(df["time_utc"], errors="coerce")
+
+    df = df.dropna(subset=["platform_id", "time_utc"])
+    return df
+
+
+# -----------------------------------------------------------------------------
+# Merge helpers
+# -----------------------------------------------------------------------------
+def _merge_asof_single_platform(
     left: pd.DataFrame,
     right: pd.DataFrame,
     tolerance: str,
-    suffix: str,
+    *,
+    suffix: str = "",
+    direction: str = "nearest",
 ) -> pd.DataFrame:
     """
-    Nearest-time merge_asof of 'right' onto 'left', per platform_id.
-    right must contain: platform_id, time_utc, ...
+    Nearest-time merge_asof for a single platform (platform_id already filtered).
+    Keeps all left rows.
     """
-    l = left.sort_values(["platform_id", "time_utc"]).copy()
-    r = right.sort_values(["platform_id", "time_utc"]).copy()
+    l = left.sort_values("time_utc").copy()
+    r = right.sort_values("time_utc").copy()
 
-    # avoid duplicate column names (except join keys)
+    # avoid duplicate column names (except keys)
     r_cols = [c for c in r.columns if c not in ("platform_id", "time_utc")]
-    r_ren = {c: f"{c}{suffix}" for c in r_cols if c in l.columns}
-    if r_ren:
-        r = r.rename(columns=r_ren)
+    ren = {c: f"{c}{suffix}" for c in r_cols if c in l.columns}
+    if ren:
+        r = r.rename(columns=ren)
 
-    out = []
-    for pid, lpid in l.groupby("platform_id", sort=False):
-        rpid = r[r["platform_id"] == pid]
-        if rpid.empty:
-            out.append(lpid)
-            continue
-
-        merged = pd.merge_asof(
-            lpid,
-            rpid.drop(columns=["platform_id"]),
-            on="time_utc",
-            direction="nearest",
-            tolerance=pd.Timedelta(tolerance),
-        )
-        out.append(merged)
-
-    return pd.concat(out, ignore_index=True)
+    merged = pd.merge_asof(
+        l,
+        r.drop(columns=["platform_id"]),
+        on="time_utc",
+        direction=direction,
+        tolerance=pd.Timedelta(tolerance),
+    )
+    return merged
 
 
+def _select_columns(df: pd.DataFrame, keep: Iterable[str]) -> pd.DataFrame:
+    cols = [c for c in keep if c in df.columns]
+    missing = [c for c in keep if c not in df.columns]
+    if missing:
+        # We do NOT error here because schemas can evolve; just keep what's available.
+        # If you prefer strictness, switch to raising.
+        pass
+    return df[cols].copy()
+
+
+# -----------------------------------------------------------------------------
+# Extensible “source” concept (for future biological variables)
+# -----------------------------------------------------------------------------
+@dataclass(frozen=True)
+class ExtraSource:
+    """
+    Defines an extra dataset to merge (e.g., oxygen, chlorophyll, fluorescence).
+
+    - name: identifier (used for lookup in paths.extra_db_dirs)
+    - base_name: file prefix (e.g., 'oxygen' -> oxygen_<pid>.csv)
+    - tolerance: asof tolerance when attaching to the base timeline
+    - suffix: suffix to append to colliding columns
+    - keep_cols: optional list of columns to keep from this dataset
+    """
+    name: str
+    base_name: str
+    tolerance: str = "30min"
+    suffix: str = ""
+    keep_cols: list[str] | None = None
+
+
+# -----------------------------------------------------------------------------
+# Master builder
+# -----------------------------------------------------------------------------
 def build_master_for_platform(
     platform_id: str,
     paths: MasterPaths,
     *,
-    target_time: str = "drifter",      # "drifter" | "hourly"
+    target_time: str = "drifter",  # "drifter" | "hourly"
     wind_tolerance: str = "30min",
     mat_tolerance: str = "30min",
     hourly_freq: str = "1H",
+    extras: list[ExtraSource] | None = None,
 ) -> pd.DataFrame:
     """
-    Build a per-platform master table by merging:
-    - drifter core data
-    - wind stats
-    - vorticity/strain MAT timeseries
+    Build a per-platform master table by merging canonical per-platform DBs.
 
-    Parameters
-    ----------
+    Rules (current spec):
+    - from drifter: lat, lon, sst_c, slp_mb
+    - from wind: all wind-related columns
+    - from mat: u, v, vorticity, strain
+    - keep platform_id + time_utc always
+    - extras: additional datasets (e.g. oxygen) can be merged as-of with a tolerance
+
     target_time:
-        "drifter" -> keep drifter timestamps; attach wind + mat via nearest-time merge_asof
-        "hourly"  -> create hourly timeline from mat (or from drifter range) and attach others to it
+    - "drifter": base timeline is drifter timestamps; attach wind + mat (+ extras)
+    - "hourly": base timeline is hourly; attach mat, drifter, wind (+ extras)
     """
     pid = str(platform_id)
 
-    d_all = read_drifter_csv(paths.drifter_csv)
-    w_all = read_wind_csv(paths.wind_csv)
-    m_all = _read_mat_timeseries(paths.mat_db_dir, pid)
+    # --- read per-platform canonical DBs
+    d = _read_per_platform(paths.drifter_db_dir, "drifter", pid)
+    w = _read_per_platform(paths.wind_db_dir, "wind", pid)
+    m = _read_per_platform(paths.mat_db_dir, "mat_timeseries", pid)
 
-    d = d_all[d_all["platform_id"] == pid].copy()
-    w = w_all[w_all["platform_id"] == pid].copy()
-    m = m_all[m_all["platform_id"] == pid].copy() if "platform_id" in m_all.columns else m_all.copy()
-    if "platform_id" not in m.columns:
-        m.insert(0, "platform_id", pid)
+    d = _ensure_keys(d, pid)
+    w = _ensure_keys(w, pid)
+    m = _ensure_keys(m, pid)
+
+    # --- select only columns we want from each source
+    d = _select_columns(d, ["platform_id", "time_utc", "lat", "lon", "sst_c", "slp_mb"])
+    # wind: keep all except duplicates are handled by merge helper
+    # but ensure at least keys
+    if "platform_id" not in w.columns or "time_utc" not in w.columns:
+        raise ValueError("Wind DB must include platform_id and time_utc")
+    # mat: keep “rest”
+    m = _select_columns(m, ["platform_id", "time_utc", "u", "v", "vorticity", "strain"])
 
     if d.empty:
-        raise ValueError(f"No drifter data found for platform_id={pid}")
+        raise ValueError(f"No drifter data found for platform_id={pid} in {paths.drifter_db_dir}")
     if m.empty:
-        raise ValueError(f"No MAT timeseries found for platform_id={pid}")
+        raise ValueError(f"No MAT timeseries found for platform_id={pid} in {paths.mat_db_dir}")
 
     if target_time not in ("drifter", "hourly"):
         raise ValueError("target_time must be 'drifter' or 'hourly'")
 
+    # --- build base timeline
     if target_time == "drifter":
         base = d.sort_values("time_utc").reset_index(drop=True)
 
         # wind onto drifter
-        base = merge_drifter_wind(base, w, tolerance=wind_tolerance)
+        if not w.empty:
+            base = _merge_asof_single_platform(base, w, tolerance=wind_tolerance, suffix="_wind")
 
         # mat onto drifter
-        base = _merge_asof_per_platform(base, m, tolerance=mat_tolerance, suffix="_mat")
+        base = _merge_asof_single_platform(base, m, tolerance=mat_tolerance, suffix="_mat")
 
-        return base.reset_index(drop=True)
+    else:
+        # hourly base timeline driven by MAT span (consistent with its native resolution)
+        tmin = m["time_utc"].min()
+        tmax = m["time_utc"].max()
+        timeline = pd.date_range(tmin.floor("H"), tmax.ceil("H"), freq=hourly_freq)
 
-    # target_time == "hourly"
-    # Use MAT time span as reference (already hourly-ish)
-    tmin = m["time_utc"].min()
-    tmax = m["time_utc"].max()
-    timeline = pd.date_range(tmin.floor("H"), tmax.ceil("H"), freq=hourly_freq)
+        base = pd.DataFrame({"time_utc": timeline})
+        base.insert(0, "platform_id", pid)
 
-    base = pd.DataFrame({"time_utc": timeline})
-    base.insert(0, "platform_id", pid)
+        # attach MAT (often already hourly)
+        base = _merge_asof_single_platform(base, m, tolerance=mat_tolerance, suffix="_mat")
 
-    # attach MAT (usually already hourly; use tight tolerance like 5min if you want)
-    base = _merge_asof_per_platform(base, m, tolerance=mat_tolerance, suffix="_mat")
+        # attach drifter onto hourly
+        base = _merge_asof_single_platform(base, d, tolerance="2H", suffix="_dr")
 
-    # attach drifter onto hourly (nearest)
-    base = _merge_asof_per_platform(base, d, tolerance="2H", suffix="_dr")
+        # attach wind onto hourly
+        if not w.empty:
+            base = _merge_asof_single_platform(base, w, tolerance="2H", suffix="_wind")
 
-    # attach wind onto hourly
-    base = _merge_asof_per_platform(base, w, tolerance="2H", suffix="_w")
+    # --- extras (future biological datasets)
+    if extras:
+        if not paths.extra_db_dirs:
+            raise ValueError("extras were provided but paths.extra_db_dirs is None")
+
+        for src in extras:
+            if src.name not in paths.extra_db_dirs:
+                raise ValueError(f"extra_db_dirs has no entry for '{src.name}'")
+
+            extra_df = _read_per_platform(paths.extra_db_dirs[src.name], src.base_name, pid)
+            extra_df = _ensure_keys(extra_df, pid)
+
+            if src.keep_cols:
+                extra_df = _select_columns(extra_df, ["platform_id", "time_utc", *src.keep_cols])
+
+            base = _merge_asof_single_platform(
+                base,
+                extra_df,
+                tolerance=src.tolerance,
+                suffix=src.suffix or f"_{src.name}",
+            )
 
     return base.reset_index(drop=True)
