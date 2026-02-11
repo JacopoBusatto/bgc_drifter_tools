@@ -108,6 +108,78 @@ def _select_columns(df: pd.DataFrame, keep: Iterable[str]) -> pd.DataFrame:
         pass
     return df[cols].copy()
 
+# -----------------------------------------------------------------------------
+# Filter helpers
+# -----------------------------------------------------------------------------
+BBOX = (-10.0, 36.0, 30.0, 46.0)  # lon_min, lon_max, lat_min, lat_max
+
+
+def filter_bbox_keep_only(d: pd.DataFrame, bbox=BBOX) -> pd.DataFrame:
+    if d.empty:
+        return d
+    lon_min, lon_max, lat_min, lat_max = bbox
+    m = d["lon"].between(lon_min, lon_max) & d["lat"].between(lat_min, lat_max)
+    return d.loc[m].copy().reset_index(drop=True)
+
+
+def filter_bbox_first_entry(d: pd.DataFrame, bbox=BBOX) -> pd.DataFrame:
+    if d.empty:
+        return d
+    d = d.sort_values("time_utc").copy()
+    lon_min, lon_max, lat_min, lat_max = bbox
+    inside = d["lon"].between(lon_min, lon_max) & d["lat"].between(lat_min, lat_max)
+    if not inside.any():
+        return d.iloc[0:0].copy()
+    t0 = d.loc[inside, "time_utc"].iloc[0]
+    return d[d["time_utc"] >= t0].reset_index(drop=True)
+
+
+def filter_largest_contiguous_segment(
+    d: pd.DataFrame,
+    *,
+    max_gap: str = "7D",
+) -> pd.DataFrame:
+    """
+    Keep only the largest contiguous time segment (by number of rows),
+    splitting segments when time gaps exceed max_gap.
+    """
+    if d.empty:
+        return d
+    d = d.sort_values("time_utc").copy()
+    dt = d["time_utc"].diff()
+    seg_id = (dt > pd.Timedelta(max_gap)).cumsum()
+    # pick the segment with the most rows
+    counts = seg_id.value_counts()
+    keep_seg = counts.index[0]
+    return d.loc[seg_id == keep_seg].reset_index(drop=True)
+
+def _first_entry_time_in_bbox(
+    d: pd.DataFrame,
+    bbox: tuple[float, float, float, float],
+) -> pd.Timestamp | None:
+    lon_min, lon_max, lat_min, lat_max = bbox
+    inside = d["lon"].between(lon_min, lon_max) & d["lat"].between(lat_min, lat_max)
+    if not inside.any():
+        return None
+    return d.loc[inside, "time_utc"].iloc[0]
+
+
+def filter_to_first_med_entry(
+    d: pd.DataFrame,
+    *,
+    bbox: tuple[float, float, float, float] = BBOX,
+) -> pd.DataFrame:
+    """
+    Keep data only from the first time the platform enters the valid box bbox.
+    """
+    if d.empty:
+        return d
+    d = d.sort_values("time_utc").copy()
+    t0 = _first_entry_time_in_bbox(d, bbox=bbox)
+    if t0 is None:
+        # No Med entry found -> return empty (explicit)
+        return d.iloc[0:0].copy()
+    return d[d["time_utc"] >= t0].reset_index(drop=True)
 
 # -----------------------------------------------------------------------------
 # Extensible “source” concept (for future biological variables)
@@ -137,11 +209,15 @@ def build_master_for_platform(
     platform_id: str,
     paths: MasterPaths,
     *,
-    target_time: str = "drifter",  # "drifter" | "hourly"
+    target_time: str = "drifter",
     wind_tolerance: str = "30min",
     mat_tolerance: str = "30min",
     hourly_freq: str = "1H",
     extras: list[ExtraSource] | None = None,
+    # NEW:
+    apply_bbox_filter: bool = True,
+    apply_segment_filter: bool = False,
+    segment_max_gap: str = "7D",
 ) -> pd.DataFrame:
     """
     Build a per-platform master table by merging canonical per-platform DBs.
@@ -169,7 +245,40 @@ def build_master_for_platform(
     m = _ensure_keys(m, pid)
 
     # --- select only columns we want from each source
-    d = _select_columns(d, ["platform_id", "time_utc", "lat", "lon", "sst_c", "slp_mb"])
+    # Drifter: keep core + known optional + (new) lagrangian kinematics.
+    # Note: _select_columns is non-strict, so missing optional columns are fine.
+    drifter_keep = [
+        # keys
+        "platform_id",
+        "time_utc",
+        # core trajectory
+        "lat",
+        "lon",
+        # common phys/met
+        "sst_c",
+        "slp_mb",
+        # "battery_v",
+        # "drogue_counts",
+        # optional extended schema (if present in some chunks)
+        "salinity_psu",
+        # "sst_sbe_c",
+        # "wind_speed_ms",
+        # "wind_dir_deg",
+        # NEW: lagrangian kinematics + rotation index
+        "u_lag_ms",
+        "v_lag_ms",
+        "ax_lag_ms2",
+        "ay_lag_ms2",
+        "rotation_index",
+    ]
+    d = _select_columns(d, drifter_keep)
+    # --- optional geographic + segment filters
+    if apply_bbox_filter:
+        d = filter_to_first_med_entry(d)
+
+    if apply_segment_filter:
+        d = filter_largest_contiguous_segment(d, max_gap=segment_max_gap)
+
     # wind: keep all except duplicates are handled by merge helper
     # but ensure at least keys
     if "platform_id" not in w.columns or "time_utc" not in w.columns:

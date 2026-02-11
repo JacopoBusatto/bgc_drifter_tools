@@ -3,7 +3,7 @@ from __future__ import annotations
 from io import StringIO
 from pathlib import Path
 from typing import Iterable
-
+import numpy as np
 import pandas as pd
 
 
@@ -252,3 +252,131 @@ def merge_drifter_wind(
         out.append(merged)
 
     return pd.concat(out, ignore_index=True)
+
+
+
+
+# -----------------------------------------------------------------------------
+# Kinematics
+# -----------------------------------------------------------------------------
+def add_lagrangian_kinematics(
+    df: pd.DataFrame,
+    *,
+    group_col: str = "platform_id",
+    time_col: str = "time_utc",
+    lat_col: str = "lat",
+    lon_col: str = "lon",
+    earth_radius_m: float = 6371000.0,
+) -> pd.DataFrame:
+    """
+    Add Lagrangian velocity/acceleration components (east/north) and rotation index.
+
+    Output columns:
+      - u_lag_ms, v_lag_ms
+      - ax_lag_ms2, ay_lag_ms2
+      - rotation_index  (sin(angle between velocity unit vector and acceleration unit vector))
+
+    Method:
+      - Convert lat/lon to local dx,dy using spherical approximation:
+          dx = R * cos(lat) * dlon
+          dy = R * dlat
+      - Compute velocities via finite differences (central for interior, forward/backward at ends)
+      - Compute accelerations by differentiating velocity similarly
+      - rotation_index = (v_hat x a_hat)_z = v_hat_x * a_hat_y - v_hat_y * a_hat_x
+    """
+    out = df.copy()
+
+    # ensure ordering
+    out = out.sort_values([group_col, time_col]).reset_index(drop=True)
+
+    # allocate columns
+    for c in ["u_lag_ms", "v_lag_ms", "ax_lag_ms2", "ay_lag_ms2", "rotation_index"]:
+        out[c] = np.nan
+
+    def _finite_diff(x: np.ndarray, t: np.ndarray) -> np.ndarray:
+        """
+        x: position component (m) or velocity component (m/s)
+        t: time in seconds (float)
+        returns dx/dt with central differences (ends: forward/backward)
+        """
+        n = len(x)
+        y = np.full(n, np.nan, dtype=float)
+        if n < 2:
+            return y
+
+        # forward/backward
+        dt0 = t[1] - t[0]
+        dtn = t[-1] - t[-2]
+        if dt0 != 0:
+            y[0] = (x[1] - x[0]) / dt0
+        if dtn != 0:
+            y[-1] = (x[-1] - x[-2]) / dtn
+
+        if n >= 3:
+            dt = t[2:] - t[:-2]
+            num = x[2:] - x[:-2]
+            mask = dt != 0
+            y[1:-1][mask] = num[mask] / dt[mask]
+
+        return y
+
+    for pid, g in out.groupby(group_col, sort=False):
+        if g.empty:
+            continue
+
+        # time in seconds
+        t = pd.to_datetime(g[time_col], errors="coerce")
+        t_s = (t.astype("int64") / 1e9).to_numpy(dtype=float)  # seconds since epoch
+
+        lat = pd.to_numeric(g[lat_col], errors="coerce").to_numpy(dtype=float)
+        lon = pd.to_numeric(g[lon_col], errors="coerce").to_numpy(dtype=float)
+
+        # require finite values
+        ok = np.isfinite(t_s) & np.isfinite(lat) & np.isfinite(lon)
+        if ok.sum() < 2:
+            continue
+
+        # work only on valid subset indices (keep NaN elsewhere)
+        idx = g.index.to_numpy()
+        idx_ok = idx[ok]
+        t_ok = t_s[ok]
+        lat_ok = np.deg2rad(lat[ok])
+        lon_ok = np.deg2rad(lon[ok])
+
+        # local dx,dy in meters (relative differences)
+        # build cumulative position from increments so diff works in meters
+        dlat = np.diff(lat_ok, prepend=lat_ok[0])
+        dlon = np.diff(lon_ok, prepend=lon_ok[0])
+
+        # use cos(lat) at current sample
+        dx = earth_radius_m * np.cos(lat_ok) * dlon
+        dy = earth_radius_m * dlat
+
+        x = np.cumsum(dx)  # meters
+        y = np.cumsum(dy)  # meters
+
+        u = _finite_diff(x, t_ok)   # m/s east
+        v = _finite_diff(y, t_ok)   # m/s north
+        ax = _finite_diff(u, t_ok)  # m/s^2 east
+        ay = _finite_diff(v, t_ok)  # m/s^2 north
+
+        # rotation index: cross product of unit vectors (v_hat x a_hat)_z
+        vnorm = np.sqrt(u*u + v*v)
+        anorm = np.sqrt(ax*ax + ay*ay)
+
+        rot = np.full_like(u, np.nan, dtype=float)
+        eps = 1e-12
+        mask = (vnorm > eps) & (anorm > eps)
+        uhat = u[mask] / vnorm[mask]
+        vhat = v[mask] / vnorm[mask]
+        axhat = ax[mask] / anorm[mask]
+        ayhat = ay[mask] / anorm[mask]
+        rot[mask] = uhat * ayhat - vhat * axhat
+
+        out.loc[idx_ok, "u_lag_ms"] = u
+        out.loc[idx_ok, "v_lag_ms"] = v
+        out.loc[idx_ok, "ax_lag_ms2"] = ax
+        out.loc[idx_ok, "ay_lag_ms2"] = ay
+        out.loc[idx_ok, "rotation_index"] = rot
+
+    return out

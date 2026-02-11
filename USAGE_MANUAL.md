@@ -42,6 +42,19 @@ source .venv/bin/activate
 pip install -e .
 ```
 
+## 4. (Optional) Install visualization extras (plots)
+
+If you want to generate diagnostic plots (time series, Cartopy maps, wind rose):
+
+```bash
+pip install -e ".[viz]"
+```
+
+If Cartopy fails to install via pip, use conda-forge:
+
+```bash
+mamba install -c conda-forge cartopy proj geos pyproj
+```
 ---
 
 # 📁 Expected Input Files
@@ -66,6 +79,7 @@ python -m bgcd.cli_prepare_drifter \
   --input-file "PATH/drifter_data.csv" \
   --output-dir "PATH/db_drifter" \
   --format csv
+  --no-kinematics
 ```
 
 ## What it does
@@ -75,6 +89,16 @@ python -m bgcd.cli_prepare_drifter \
 - Normalizes schema
 - Converts timestamps
 - Cleans numeric fields
+
+Additionally, this step computes:
+
+- Lagrangian velocity (u_lag_ms, v_lag_ms)
+- Lagrangian acceleration (ax_lag_ms2, ay_lag_ms2)
+- Rotation index (rotation_index)
+
+If --no-kinematics is omitted.
+These are derived directly from successive trajectory positions using finite differences.
+
 
 ## Output
 
@@ -149,151 +173,147 @@ db_mat/
 
 # 4️⃣ Build MASTER Dataset
 
-## Single Platform
+# MASTER Dataset Construction
 
-```bash
-python -m bgcd.cli_master \
-  --platform-id 300534065378180 \
-  --drifter-db-dir "PATH/db_drifter" \
-  --wind-db-dir "PATH/db_wind" \
-  --mat-db-dir "PATH/db_mat" \
-  --output-dir "PATH/db_master" \
-  --format csv
+The MASTER table merges:
+
+- Drifter canonical data
+- Wind canonical data
+- Eulerian MAT diagnostics
+
+---
+
+## Basic Command
+
+```powershell
+python -m bgcd.cli_master `
+  --platform-id 300534065378180 `
+  --drifter-db-dir "C:/.../db_drifter" `
+  --wind-db-dir    "C:/.../db_wind" `
+  --mat-db-dir     "C:/.../db_mat" `
+  --output-dir     "C:/.../db_master" `
+  --format csv `
+  --target-time drifter `
+  --mode per-platform
 ```
 
 ---
 
-## Multiple Platforms
+## Filtering Options
 
-```bash
-python -m bgcd.cli_master \
-  --platform-id 300534065378180 \
-  --platform-id 300534065379230 \
-  --platform-id 300534065470010 \
-  --drifter-db-dir "PATH/db_drifter" \
-  --wind-db-dir "PATH/db_wind" \
-  --mat-db-dir "PATH/db_mat" \
-  --output-dir "PATH/db_master"
+### Geographic Filter (default ON)
+
+Keeps only Mediterranean bounding box.
+
+Disable with:
+
+```powershell
+--no-bbox-filter
 ```
 
 ---
 
-## From File List
+### Continuous Segment Filter (optional)
 
-Create `platforms.txt`:
+Keeps only the largest continuous temporal segment:
 
-```
-300534065378180
-300534065379230
-300534065470010
+```powershell
+--segment-filter
 ```
 
-Then:
+Control maximum allowed gap:
 
-```bash
-python -m bgcd.cli_master \
-  --platform-ids-file platforms.txt \
-  --drifter-db-dir "PATH/db_drifter" \
-  --wind-db-dir "PATH/db_wind" \
-  --mat-db-dir "PATH/db_mat" \
-  --output-dir "PATH/db_master"
+```powershell
+--segment-max-gap 7D
+```
+
+Example full command:
+
+```powershell
+python -m bgcd.cli_master `
+  --platform-id 300534065378180 `
+  --drifter-db-dir "C:/.../db_drifter" `
+  --wind-db-dir    "C:/.../db_wind" `
+  --mat-db-dir     "C:/.../db_mat" `
+  --output-dir     "C:/.../db_master" `
+  --format csv `
+  --target-time drifter `
+  --mode per-platform `
+  --segment-filter `
+  --segment-max-gap 7D
 ```
 
 ---
 
-# ⚙️ Important Options
+## Temporal Strategy
 
-## Timeline Mode
+### `--target-time drifter` (default)
 
-Default (recommended for Lagrangian analysis):
+- MASTER timeline = drifter timestamps
+- Wind + MAT attached via nearest-time merge
+- No interpolation
+- Missing values remain explicit
 
-```
---target-time drifter
-```
+### `--target-time hourly`
 
-Alternative (regular hourly grid):
-
-```
---target-time hourly
-```
+- MASTER timeline = hourly
+- MAT defines reference span
+- Drifter + wind attached via nearest-time merge
 
 ---
 
 ## Merge Tolerances
 
-Default:
+Defaults:
 
 ```
 --wind-tolerance 30min
 --mat-tolerance 30min
 ```
 
-Increase if necessary:
+You may increase if needed:
 
 ```
---wind-tolerance 1H
---mat-tolerance 1H
+--mat-tolerance 2H
 ```
 
 ---
 
 ## Output Modes
 
-Per platform (default):
+### Per Platform (recommended)
 
 ```
 --mode per-platform
 ```
 
-Single merged file:
+Output:
+```
+master_<platform_id>.csv
+```
+
+### Single File
 
 ```
 --mode single
 ```
 
----
-
-## Include Time-Difference Diagnostics
-
-```bash
---with-dt
+Output:
 ```
-
-Adds:
-
-- time_wind
-- dt_wind_min
-- time_mat
-- dt_mat_min
-
-Useful for scientific validation.
+master_all.csv
+```
 
 ---
 
-# 📊 Expected Output Structure
+## Scientific Notes
 
-Example MASTER columns:
-
-```
-platform_id
-time_utc
-lat
-lon
-sst_c
-slp_mb
-[winds fields...]
-u
-v
-vorticity
-strain
-```
-
-Missing values (`NaN`) are expected when:
-
-- Data are outside coverage period
-- No match found within tolerance
+- No interpolation is performed by default.
+- Missing values are preserved.
+- Filters are applied before merging.
+- MASTER remains physically consistent with Lagrangian trajectory.
 
 ---
+
 
 # 🔄 Full Pipeline Summary
 

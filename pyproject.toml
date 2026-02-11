@@ -28,6 +28,12 @@ dev = [
   "h5py",
 ]
 
+viz = [
+  "cartopy",
+  "seaborn",
+  "windrose",
+]
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 

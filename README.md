@@ -79,6 +79,30 @@ If you want Parquet support:
 pip install pyarrow
 ```
 
+## Optional visualization dependencies (plots)
+
+To generate maps (Cartopy), improved time series styling, and wind-rose diagrams, install the **viz** extra:
+
+```bash
+pip install -e ".[viz]"
+```
+
+This installs:
+- cartopy (maps with coastlines/land/ocean)
+- seaborn (optional styling helpers)
+- windrose (wind rose plots)
+
+If you only need the core preprocessing/merge CLI, you can skip this extra.
+
+### Notes on Cartopy installation
+
+On some systems, Cartopy may require native libraries (PROJ/GEOS).
+If pip installation fails, the most reliable option is installing via conda-forge:
+
+mamba install -c conda-forge cartopy proj geos pyproj
+
+(Then you can still run `pip install -e .` in the repository.)
+
 ---
 
 # Full Operational Workflow
@@ -251,25 +275,129 @@ master_all.csv
 
 ---
 
+## Spatial and Temporal Filtering (Deployment Cleaning)
+
+Operational drifters may include:
+
+- Pre-deployment test positions (e.g. US harbor locations)
+- Large unrealistic jumps
+- Multi-segment trajectories separated by long gaps
+
+To ensure Mediterranean-only analysis, the MASTER builder supports two optional filters.
+
+---
+
+### 1️⃣ Geographic Filter (Bounding Box)
+
+By default, the MASTER CLI keeps only observations inside a predefined Mediterranean bounding box:
+
+```
+lon ∈ [-6°, 36°]
+lat ∈ [30°, 46°]
+```
+
+This automatically removes:
+
+- Pre-shipment US locations
+- Erroneous transoceanic jumps
+- Positions outside the study domain
+
+To disable this filter (debug only):
+
+```bash
+--no-bbox-filter
+```
+
+---
+
+### 2️⃣ Largest Continuous Temporal Segment
+
+Some trajectories may contain multiple disconnected time blocks.
+
+Example:
+- July (harbor tests)
+- September–November (real Mediterranean deployment)
+
+To keep only the physically meaningful deployment segment:
+
+```bash
+--segment-filter
+```
+
+You may control the maximum allowed temporal gap:
+
+```bash
+--segment-max-gap 7D
+```
+
+Meaning:
+- If a gap > 7 days exists,
+- A new segment starts,
+- Only the longest continuous segment is retained.
+
+Default:
+- Segment filter OFF
+- Gap threshold = 7 days
+
+---
+
+### Why this is important
+
+This avoids:
+
+- Mixing pre-deployment and operational data
+- Unrealistic velocity/acceleration artifacts
+- Bias in rotation index or Lagrangian diagnostics
+
+Filtering is applied **before merging wind and Eulerian fields**.
+
+---
+
+
 # Canonical Data Model
 
-## Drifter (canonical)
+### Drifter (extended canonical – with Lagrangian kinematics)
 
-Required:
-- platform_id
-- time_utc
-- lat
-- lon
+In addition to core observational variables, the drifter database now includes
+derived Lagrangian kinematic quantities computed directly from the trajectory:
 
-Optional:
-- sst_c
-- slp_mb
-- salinity_psu
-- sst_sbe_c
-- wind_speed_ms
-- wind_dir_deg
-- battery_v
-- drogue_counts
+#### Lagrangian velocity components
+- `u_lag_ms`  → zonal Lagrangian velocity (m/s)
+- `v_lag_ms`  → meridional Lagrangian velocity (m/s)
+
+#### Lagrangian acceleration components
+- `ax_lag_ms2` → zonal acceleration (m/s²)
+- `ay_lag_ms2` → meridional acceleration (m/s²)
+
+#### Rotation Index
+- `rotation_index`
+
+The rotation index is defined as:
+
+\[
+RI = \hat{v} \times \hat{a}
+\]
+
+where:
+
+- \( \hat{v} \) is the unit Lagrangian velocity vector
+- \( \hat{a} \) is the unit Lagrangian acceleration vector
+
+In 2D this reduces to:
+
+\[
+RI = \sin(\theta)
+\]
+
+where \( \theta \) is the angle between velocity and acceleration.
+
+Interpretation:
+- RI ≈ 0 → motion approximately straight
+- RI > 0 → counterclockwise rotation tendency
+- RI < 0 → clockwise rotation tendency
+- |RI| ≈ 1 → strong curvature
+
+These quantities are automatically computed during `cli_prepare_drifter`.
 
 ## Wind (canonical)
 

@@ -33,8 +33,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--hourly-freq", default="1H", help="Hourly frequency when target-time=hourly.")
 
     # optional diagnostics columns
-    p.add_argument("--with-dt", action="store_true",
-                   help="Include matched source timestamps and |Δt| diagnostics columns (dt_*_min).")
+    p.add_argument("--with-dt", action="store_true", help="Include matched source timestamps and |Δt| diagnostics columns (dt_*_min).")
+    p.add_argument("--no-bbox-filter", action="store_true", help="Disable automatic Mediterranean bbox filter.")
+    p.add_argument("--segment-filter", action="store_true", help="Keep only largest contiguous time segment.")
+    p.add_argument("--segment-max-gap", default="7D", help="Maximum allowed time gap inside contiguous segment (default: 7D).")
 
     return p.parse_args(argv)
 
@@ -98,9 +100,9 @@ def main(argv: list[str] | None = None) -> int:
                 wind_tolerance=args.wind_tolerance,
                 mat_tolerance=args.mat_tolerance,
                 hourly_freq=args.hourly_freq,
-                # NOTE: build_master_for_platform should accept with_dt.
-                # If not yet implemented, just keep this line commented and run without --with-dt.
-                with_dt=args.with_dt,  # type: ignore[arg-type]
+                apply_bbox_filter=not args.no_bbox_filter,
+                apply_segment_filter=args.segment_filter,
+                segment_max_gap=args.segment_max_gap,
             )
         except TypeError:
             # fallback if with_dt is not implemented yet
@@ -140,15 +142,20 @@ if __name__ == "__main__":
 pip install -e .
 python -m bgcd.cli_master `
   --platform-id 300534065378180 `
+  --platform-id 300534065379230 `
+  --platform-id 300534065470010 `
   --drifter-db-dir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_drifter" `
   --wind-db-dir    "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_wind" `
   --mat-db-dir     "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_mat" `
-  --output-dir     "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_master_cli" `
+  --output-dir     "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_master" `
   --format csv `
-  --target-time drifter
+  --mat-tolerance 2H `
+  --target-time drifter `
+  --mode per-platform `
+  --segment-filter `
+  --segment-max-gap 7D
 
-
-
+SOLO BBOX
 python -m bgcd.cli_master `
   --platform-id 300534065378180 `
   --platform-id 300534065379230 `
@@ -161,4 +168,17 @@ python -m bgcd.cli_master `
   --mat-tolerance 2H `
   --target-time drifter `
   --mode per-platform
+
+  NESSUN FILTRO
+python -m bgcd.cli_master `
+  --platform-id 300534065378180 `
+  --drifter-db-dir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_drifter" `
+  --wind-db-dir    "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_wind" `
+  --mat-db-dir     "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_mat" `
+  --output-dir     "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_master" `
+  --format csv `
+  --mat-tolerance 2H `
+  --target-time drifter `
+  --mode per-platform `
+  --no-bbox-filter
 """

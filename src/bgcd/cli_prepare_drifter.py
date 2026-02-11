@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from .raw_split import split_raw_csv_into_platform_chunks
-from .io import canonicalize_drifter_df
+from .io import canonicalize_drifter_df, add_lagrangian_kinematics
 
 
 def _parse_args(argv=None) -> argparse.Namespace:
@@ -17,6 +17,12 @@ def _parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--input-file", required=True, help="Path to raw drifter_data.csv")
     p.add_argument("--output-dir", required=True, help="Directory where canonical files will be written")
     p.add_argument("--format", choices=["csv", "parquet"], default="csv")
+    p.add_argument(
+        "--no-kinematics",
+        action="store_true",
+        help="Disable computation of Lagrangian velocity/acceleration and rotation index.",
+    )
+
     return p.parse_args(argv)
 
 
@@ -44,6 +50,9 @@ def main(argv=None) -> int:
             print(f"SKIP {pid} (canonicalize error): {e}")
             continue
 
+        if not args.no_kinematics:
+            canon = add_lagrangian_kinematics(canon)
+
         if canon.empty:
             print(f"SKIP {pid} (empty after canonicalize)")
             continue
@@ -62,6 +71,6 @@ if __name__ == "__main__":
 
 """
 python -m bgcd.cli_prepare_drifter `
-  --input-file ""C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/drifter_data.csv" `
-  --output-dir ""C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_drifter_new"
+  --input-file "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/drifter_data.csv" `
+  --output-dir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_drifter"
 """
