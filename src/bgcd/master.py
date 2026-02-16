@@ -75,16 +75,33 @@ def _merge_asof_single_platform(
     *,
     suffix: str = "",
     direction: str = "nearest",
+    tag: str | None = None,
+    with_dt: bool = False,
 ) -> pd.DataFrame:
     """
     Nearest-time merge_asof for a single platform (platform_id already filtered).
     Keeps all left rows.
+
+    If with_dt=True, keeps matched right timestamps and adds |Δt| diagnostics:
+      - time_utc_<tag>
+      - dt_<tag>_min
     """
     l = left.sort_values("time_utc").copy()
     r = right.sort_values("time_utc").copy()
 
-    # avoid duplicate column names (except keys)
-    r_cols = [c for c in r.columns if c not in ("platform_id", "time_utc")]
+    # If diagnostics requested, keep right time under a different column name
+    if with_dt:
+        tcol = f"time_utc_{tag}" if tag else "time_utc_right"
+        r = r.rename(columns={"time_utc": tcol})
+        left_on = "time_utc"
+        right_on = tcol
+    else:
+        left_on = right_on = "time_utc"
+
+    # avoid duplicate column names (except keys + time columns)
+    protected = {"platform_id", left_on, right_on}
+    r_cols = [c for c in r.columns if c not in protected]
+
     ren = {c: f"{c}{suffix}" for c in r_cols if c in l.columns}
     if ren:
         r = r.rename(columns=ren)
@@ -92,11 +109,18 @@ def _merge_asof_single_platform(
     merged = pd.merge_asof(
         l,
         r.drop(columns=["platform_id"]),
-        on="time_utc",
+        left_on=left_on,
+        right_on=right_on,
         direction=direction,
         tolerance=pd.Timedelta(tolerance),
     )
+
+    if with_dt:
+        dt_col = f"dt_{tag}_min" if tag else "dt_right_min"
+        merged[dt_col] = (merged[right_on] - merged["time_utc"]).abs() / pd.Timedelta("1min")
+
     return merged
+
 
 
 def _select_columns(df: pd.DataFrame, keep: Iterable[str]) -> pd.DataFrame:
@@ -218,20 +242,25 @@ def build_master_for_platform(
     apply_bbox_filter: bool = True,
     apply_segment_filter: bool = False,
     segment_max_gap: str = "7D",
+    with_dt: bool = False,
 ) -> pd.DataFrame:
     """
     Build a per-platform master table by merging canonical per-platform DBs.
 
     Rules (current spec):
-    - from drifter: lat, lon, sst_c, slp_mb
+    - from drifter: lat, lon, sst_c, slp_mb (+ optional extended schema)
     - from wind: all wind-related columns
-    - from mat: u, v, vorticity, strain
+    - from mat: u, v, vorticity, strain, okubo_weiss
     - keep platform_id + time_utc always
     - extras: additional datasets (e.g. oxygen) can be merged as-of with a tolerance
 
     target_time:
     - "drifter": base timeline is drifter timestamps; attach wind + mat (+ extras)
     - "hourly": base timeline is hourly; attach mat, drifter, wind (+ extras)
+
+    with_dt:
+    - if True, keep matched timestamps from each source and add dt_<source>_min diagnostics
+      (requires _merge_asof_single_platform to support tag + with_dt)
     """
     pid = str(platform_id)
 
@@ -245,8 +274,6 @@ def build_master_for_platform(
     m = _ensure_keys(m, pid)
 
     # --- select only columns we want from each source
-    # Drifter: keep core + known optional + (new) lagrangian kinematics.
-    # Note: _select_columns is non-strict, so missing optional columns are fine.
     drifter_keep = [
         # keys
         "platform_id",
@@ -257,21 +284,19 @@ def build_master_for_platform(
         # common phys/met
         "sst_c",
         "slp_mb",
-        # "battery_v",
-        # "drogue_counts",
         # optional extended schema (if present in some chunks)
         "salinity_psu",
-        # "sst_sbe_c",
-        # "wind_speed_ms",
-        # "wind_dir_deg",
-        # NEW: lagrangian kinematics + rotation index
+        # lagrangian kinematics + rotation index (if present)
         "u_lag_ms",
         "v_lag_ms",
         "ax_lag_ms2",
         "ay_lag_ms2",
         "rotation_index",
+        "curvature_m1",
+        "curvature_signed_m1",
     ]
     d = _select_columns(d, drifter_keep)
+
     # --- optional geographic + segment filters
     if apply_bbox_filter:
         d = filter_to_first_med_entry(d)
@@ -279,12 +304,12 @@ def build_master_for_platform(
     if apply_segment_filter:
         d = filter_largest_contiguous_segment(d, max_gap=segment_max_gap)
 
-    # wind: keep all except duplicates are handled by merge helper
-    # but ensure at least keys
+    # wind: keep all columns (only ensure keys)
     if "platform_id" not in w.columns or "time_utc" not in w.columns:
         raise ValueError("Wind DB must include platform_id and time_utc")
-    # mat: keep “rest”
-    m = _select_columns(m, ["platform_id", "time_utc", "u", "v", "vorticity", "strain"])
+
+    # mat: keep a subset
+    m = _select_columns(m, ["platform_id", "time_utc", "u", "v", "vorticity", "strain", "okubo_weiss"])
 
     if d.empty:
         raise ValueError(f"No drifter data found for platform_id={pid} in {paths.drifter_db_dir}")
@@ -298,12 +323,26 @@ def build_master_for_platform(
     if target_time == "drifter":
         base = d.sort_values("time_utc").reset_index(drop=True)
 
-        # wind onto drifter
+        # wind onto drifter timeline
         if not w.empty:
-            base = _merge_asof_single_platform(base, w, tolerance=wind_tolerance, suffix="_wind")
+            base = _merge_asof_single_platform(
+                base,
+                w,
+                tolerance=wind_tolerance,
+                suffix="_wind",
+                tag="wind",
+                with_dt=with_dt,
+            )
 
-        # mat onto drifter
-        base = _merge_asof_single_platform(base, m, tolerance=mat_tolerance, suffix="_mat")
+        # mat onto drifter timeline
+        base = _merge_asof_single_platform(
+            base,
+            m,
+            tolerance=mat_tolerance,
+            suffix="_mat",
+            tag="mat",
+            with_dt=with_dt,
+        )
 
     else:
         # hourly base timeline driven by MAT span (consistent with its native resolution)
@@ -315,16 +354,37 @@ def build_master_for_platform(
         base.insert(0, "platform_id", pid)
 
         # attach MAT (often already hourly)
-        base = _merge_asof_single_platform(base, m, tolerance=mat_tolerance, suffix="_mat")
+        base = _merge_asof_single_platform(
+            base,
+            m,
+            tolerance=mat_tolerance,
+            suffix="_mat",
+            tag="mat",
+            with_dt=with_dt,
+        )
 
         # attach drifter onto hourly
-        base = _merge_asof_single_platform(base, d, tolerance="2H", suffix="_dr")
+        base = _merge_asof_single_platform(
+            base,
+            d,
+            tolerance="2H",
+            suffix="_dr",
+            tag="drifter",
+            with_dt=with_dt,
+        )
 
         # attach wind onto hourly
         if not w.empty:
-            base = _merge_asof_single_platform(base, w, tolerance="2H", suffix="_wind")
+            base = _merge_asof_single_platform(
+                base,
+                w,
+                tolerance="2H",
+                suffix="_wind",
+                tag="wind",
+                with_dt=with_dt,
+            )
 
-    # --- extras (future biological datasets)
+    # --- extras (e.g. oxygen)
     if extras:
         if not paths.extra_db_dirs:
             raise ValueError("extras were provided but paths.extra_db_dirs is None")
@@ -344,6 +404,8 @@ def build_master_for_platform(
                 extra_df,
                 tolerance=src.tolerance,
                 suffix=src.suffix or f"_{src.name}",
+                tag=src.name,          # <-- oxygen -> time_utc_oxygen + dt_oxygen_min
+                with_dt=with_dt,
             )
 
     return base.reset_index(drop=True)

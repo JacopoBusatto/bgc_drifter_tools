@@ -259,6 +259,9 @@ def merge_drifter_wind(
 # -----------------------------------------------------------------------------
 # Kinematics
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Kinematics
+# -----------------------------------------------------------------------------
 def add_lagrangian_kinematics(
     df: pd.DataFrame,
     *,
@@ -267,22 +270,29 @@ def add_lagrangian_kinematics(
     lat_col: str = "lat",
     lon_col: str = "lon",
     earth_radius_m: float = 6371000.0,
+    # NEW: threshold to avoid curvature blow-ups at near-zero speed
+    min_speed_ms: float = 1e-3,
 ) -> pd.DataFrame:
     """
-    Add Lagrangian velocity/acceleration components (east/north) and rotation index.
+    Add Lagrangian velocity/acceleration components (east/north), rotation index,
+    and trajectory curvature.
 
     Output columns:
       - u_lag_ms, v_lag_ms
       - ax_lag_ms2, ay_lag_ms2
       - rotation_index  (sin(angle between velocity unit vector and acceleration unit vector))
+      - curvature_m1            (|v x a| / |v|^3)  [1/m]
+      - curvature_signed_m1     ((v x a) / |v|^3)  [1/m]
 
-    Method:
-      - Convert lat/lon to local dx,dy using spherical approximation:
-          dx = R * cos(lat) * dlon
-          dy = R * dlat
-      - Compute velocities via finite differences (central for interior, forward/backward at ends)
-      - Compute accelerations by differentiating velocity similarly
-      - rotation_index = (v_hat x a_hat)_z = v_hat_x * a_hat_y - v_hat_y * a_hat_x
+    Notes
+    -----
+    Curvature definition (2D):
+      cross = u*ay - v*ax
+      kappa_abs = |cross| / (u^2+v^2)^(3/2)
+      kappa_sgn =  cross  / (u^2+v^2)^(3/2)
+
+    Curvature becomes unstable when speed -> 0. We set curvature to NaN when
+    speed < min_speed_ms.
     """
     out = df.copy()
 
@@ -290,7 +300,13 @@ def add_lagrangian_kinematics(
     out = out.sort_values([group_col, time_col]).reset_index(drop=True)
 
     # allocate columns
-    for c in ["u_lag_ms", "v_lag_ms", "ax_lag_ms2", "ay_lag_ms2", "rotation_index"]:
+    kin_cols = [
+        "u_lag_ms", "v_lag_ms",
+        "ax_lag_ms2", "ay_lag_ms2",
+        "rotation_index",
+        "curvature_m1", "curvature_signed_m1",
+    ]
+    for c in kin_cols:
         out[c] = np.nan
 
     def _finite_diff(x: np.ndarray, t: np.ndarray) -> np.ndarray:
@@ -331,24 +347,20 @@ def add_lagrangian_kinematics(
         lat = pd.to_numeric(g[lat_col], errors="coerce").to_numpy(dtype=float)
         lon = pd.to_numeric(g[lon_col], errors="coerce").to_numpy(dtype=float)
 
-        # require finite values
         ok = np.isfinite(t_s) & np.isfinite(lat) & np.isfinite(lon)
         if ok.sum() < 2:
             continue
 
-        # work only on valid subset indices (keep NaN elsewhere)
         idx = g.index.to_numpy()
         idx_ok = idx[ok]
         t_ok = t_s[ok]
         lat_ok = np.deg2rad(lat[ok])
         lon_ok = np.deg2rad(lon[ok])
 
-        # local dx,dy in meters (relative differences)
-        # build cumulative position from increments so diff works in meters
+        # local dx,dy in meters
         dlat = np.diff(lat_ok, prepend=lat_ok[0])
         dlon = np.diff(lon_ok, prepend=lon_ok[0])
 
-        # use cos(lat) at current sample
         dx = earth_radius_m * np.cos(lat_ok) * dlon
         dy = earth_radius_m * dlat
 
@@ -366,17 +378,30 @@ def add_lagrangian_kinematics(
 
         rot = np.full_like(u, np.nan, dtype=float)
         eps = 1e-12
-        mask = (vnorm > eps) & (anorm > eps)
-        uhat = u[mask] / vnorm[mask]
-        vhat = v[mask] / vnorm[mask]
-        axhat = ax[mask] / anorm[mask]
-        ayhat = ay[mask] / anorm[mask]
-        rot[mask] = uhat * ayhat - vhat * axhat
+        m_rot = (vnorm > eps) & (anorm > eps)
+        uhat = u[m_rot] / vnorm[m_rot]
+        vhat = v[m_rot] / vnorm[m_rot]
+        axhat = ax[m_rot] / anorm[m_rot]
+        ayhat = ay[m_rot] / anorm[m_rot]
+        rot[m_rot] = uhat * ayhat - vhat * axhat
+
+        # NEW: curvature (absolute and signed)
+        cross = u * ay - v * ax  # (v x a)_z
+        denom = (u*u + v*v) ** 1.5
+
+        kappa_abs = np.full_like(u, np.nan, dtype=float)
+        kappa_sgn = np.full_like(u, np.nan, dtype=float)
+
+        m_k = (vnorm >= float(min_speed_ms)) & (denom > 0)
+        kappa_abs[m_k] = np.abs(cross[m_k]) / denom[m_k]
+        kappa_sgn[m_k] = cross[m_k] / denom[m_k]
 
         out.loc[idx_ok, "u_lag_ms"] = u
         out.loc[idx_ok, "v_lag_ms"] = v
         out.loc[idx_ok, "ax_lag_ms2"] = ax
         out.loc[idx_ok, "ay_lag_ms2"] = ay
         out.loc[idx_ok, "rotation_index"] = rot
+        out.loc[idx_ok, "curvature_m1"] = kappa_abs
+        out.loc[idx_ok, "curvature_signed_m1"] = kappa_sgn
 
     return out

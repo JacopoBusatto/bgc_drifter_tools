@@ -17,11 +17,7 @@ def _parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--input-file", required=True, help="Path to raw drifter_data.csv")
     p.add_argument("--output-dir", required=True, help="Directory where canonical files will be written")
     p.add_argument("--format", choices=["csv", "parquet"], default="csv")
-    p.add_argument(
-        "--no-kinematics",
-        action="store_true",
-        help="Disable computation of Lagrangian velocity/acceleration and rotation index.",
-    )
+    p.add_argument("--no-kinematics", action="store_true", help="Disable computation of Lagrangian velocity/acceleration and rotation index.")
 
     return p.parse_args(argv)
 

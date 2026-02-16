@@ -128,10 +128,19 @@ def mat_to_dataframe(mat_path: str | Path, platform_id: str | None = None) -> pd
 
     df = df.dropna(subset=["time_utc", "lat", "lon"]).reset_index(drop=True)
 
-    if "u" in df and df["u"].abs().max() > 100:
-        print(f"Warning: large |u| values in {mat_path} (max={df['u'].abs().max():.2f})")
-    if "v" in df and df["v"].abs().max() > 100:
-        print(f"Warning: large |v| values in {mat_path} (max={df['v'].abs().max():.2f})")
+    # if "u" in df and df["u"].abs().max() > 100:
+    #     print(f"Warning: large |u| values in {mat_path} (max={df['u'].abs().max():.2f})")
+    # if "v" in df and df["v"].abs().max() > 100:
+    #     print(f"Warning: large |v| values in {mat_path} (max={df['v'].abs().max():.2f})")
+
+    # Okubo–Weiss parameter:
+    # Here "strain" is assumed to be the magnitude sqrt(sn^2 + ss^2),
+    # so OW = strain^2 - vorticity^2
+    if "strain" in df.columns and "vorticity" in df.columns:
+        df["okubo_weiss"] = df["strain"] ** 2 - df["vorticity"] ** 2
+    else:
+        # keep column absent if inputs not available
+        pass
 
     return df
 

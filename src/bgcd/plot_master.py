@@ -16,27 +16,27 @@ def read_master(path: str | Path) -> pd.DataFrame:
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(path)
-    
+
     if path.suffix.lower() == ".parquet":
         df = pd.read_parquet(path)
     else:
         df = pd.read_csv(path)
-    
+
     # time
     if "time_utc" not in df.columns:
         raise ValueError("Expected column 'time_utc' in MASTER.")
     df["time_utc"] = pd.to_datetime(df["time_utc"], errors="coerce")
-    
+
     # platform
     if "platform_id" in df.columns:
         df["platform_id"] = df["platform_id"].astype(str).str.strip()
-    
+
     # numeric
     for c in df.columns:
         if c in ("platform_id", "time_utc"):
             continue
         df[c] = pd.to_numeric(df[c], errors="coerce")
-    
+
     df = df.dropna(subset=["time_utc"]).sort_values("time_utc").reset_index(drop=True)
     return df
 
@@ -73,6 +73,19 @@ def apply_basic_masks(
 # ----------------------------
 # Helpers
 # ----------------------------
+def clip_series_quantile(series: pd.Series, qlow: float = 0.01, qhigh: float = 0.99) -> pd.Series:
+    """
+    Clip a series to given quantile range.
+    Useful for removing extreme numerical outliers (e.g. curvature spikes).
+    """
+    s = series.copy()
+    if s.notna().sum() < 5:
+        return s
+
+    lo = s.quantile(qlow)
+    hi = s.quantile(qhigh)
+    return s.clip(lower=lo, upper=hi)
+
 def wind_dirspeed_to_uv(wdir_deg: np.ndarray, wspd: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """
     Convert meteorological direction (deg FROM which wind is coming, clockwise from North)
@@ -93,15 +106,251 @@ def pick_first_existing(df: pd.DataFrame, candidates: list[str]) -> str | None:
             return c
     return None
 
+def compute_time_markers(df: pd.DataFrame, every_days: int = 7) -> pd.DataFrame:
+    """
+    Compute numbered markers every N days using the first sample in each resample bin.
+    Returns a dataframe with columns: ['marker_id', 'time_utc', 'lon', 'lat'].
+    """
+    if every_days <= 0 or "time_utc" not in df.columns:
+        return pd.DataFrame(columns=["marker_id", "time_utc", "lon", "lat"])
 
-def _add_right_axis(ax, offset: float):
-    """Create an additional y-axis on the right, offset outward by `offset`."""
-    axr = ax.twinx()
-    axr.spines["right"].set_position(("outward", offset))
-    axr.spines["right"].set_visible(True)
-    return axr
+    mk = (
+        df[["time_utc", "lon", "lat"]]
+        .dropna(subset=["time_utc", "lon", "lat"])
+        .sort_values("time_utc")
+        .set_index("time_utc")
+        .resample(f"{int(every_days)}D")
+        .first()
+        .dropna(subset=["lon", "lat"])
+        .reset_index()
+    )
+
+    if mk.empty:
+        return pd.DataFrame(columns=["marker_id", "time_utc", "lon", "lat"])
+
+    mk.insert(0, "marker_id", np.arange(1, len(mk) + 1))
+    return mk
+
+def rolling_time_mean(series: pd.Series, time: pd.Series, window: str) -> pd.Series:
+    """
+    Time-based rolling mean using a pandas offset window (e.g. '6H', '30min', '1D').
+    Works with irregular sampling.
+    """
+    s = pd.Series(series.to_numpy(), index=pd.DatetimeIndex(time))
+    s = s.sort_index()
+    return s.rolling(window=window, min_periods=1).mean().reindex(pd.DatetimeIndex(time)).to_numpy()
 
 
+
+# ----------------------------
+# Plot: single-variable time series (one PNG per variable)
+# ----------------------------
+def plot_single_ts(
+    df: pd.DataFrame,
+    outpath: Path,
+    *,
+    title: str,
+    col: str,
+    ylabel: str,
+    time_col: str = "time_utc",
+    smooth_window: str | None = None,
+    markers: pd.DataFrame | None = None,  # NEW
+) -> None:
+    """
+    Plot one variable vs time.
+    If smooth_window is provided (e.g. '6H'), applies a time-based rolling mean.
+    """
+    if col not in df.columns:
+        return
+
+    t = df[time_col]
+    y = df[col]
+
+    # Hard-coded clipping for curvature variables
+    if col in ("curvature_m1", "curvature_signed_m1"):
+        y = clip_series_quantile(y, 0.01, 0.99)
+    if col in ("DO2_c", "oxy_comp_mgL_c"):
+        y = clip_series_quantile(y, 0.01, 0.99)
+
+    if smooth_window:
+        y_sm = rolling_time_mean(y, t, smooth_window)
+        y = pd.Series(y_sm, index=y.index)
+
+    fig = plt.figure(figsize=(12.5, 4.8))
+    ax = plt.gca()
+    ax.grid(True, which="both", alpha=0.35)
+
+    ax.plot(t, y, linewidth=1.3)
+    # Vertical marker lines (same IDs as map)
+    if markers is not None and not markers.empty:
+        # put labels near the top of the axes (in axes coordinates)
+        for r in markers.itertuples(index=False):
+            ax.axvline(r.time_utc, linewidth=0.8, alpha=0.25)
+            ax.annotate(
+                str(r.marker_id),
+                xy=(r.time_utc, 1.0),
+                xycoords=("data", "axes fraction"),
+                xytext=(2, -2),
+                textcoords="offset points",
+                fontsize=8,
+                ha="left",
+                va="top",
+                alpha=0.75,
+            )
+    
+    ax.set_title(title)
+    ax.set_xlabel("Time (UTC)")
+    ax.set_ylabel(ylabel)
+
+    plt.tight_layout()
+    fig.savefig(outpath, dpi=200)
+    plt.close(fig)
+
+def plot_time_series_singles(
+    df: pd.DataFrame,
+    outdir: Path,
+    *,
+    title_prefix: str = "",
+    smooth_all: str | None = None,
+    rot_smooth: str | None = None,
+    markers: pd.DataFrame | None = None,  # NEW
+) -> None:
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    sst_col    = "sst_c"               if "sst_c" in df.columns else None
+    sal_col    = "salinity_psu"        if "salinity_psu" in df.columns else None
+    wspd_col   = pick_first_existing(df, ["wspd_mean", "wspd"])
+    vort_col   = "vorticity"           if "vorticity" in df.columns else None
+    rot_col    = "rotation_index"      if "rotation_index" in df.columns else None
+    curv_col   = "curvature_m1"        if "curvature_m1" in df.columns else None
+    curv_s_col = "curvature_signed_m1" if "curvature_signed_m1" in df.columns else None
+    strain_col = "strain"              if "strain" in df.columns else None
+    ow_col     = "okubo_weiss"         if "okubo_weiss" in df.columns else None
+    do2_raw_col = "DO2_c" if "DO2_c" in df.columns else None
+    do2_mgl_col = "oxy_comp_mgL_c" if "oxy_comp_mgL_c" in df.columns else None
+
+    if sst_col:
+        plot_single_ts(
+            df,
+            outdir / "ts_sst.png",
+            title=f"{title_prefix}SST" + (f" (smooth {smooth_all})" if smooth_all else ""),
+            col=sst_col,
+            ylabel="SST (°C)",
+            smooth_window=smooth_all,
+            markers=markers,  # NEW
+        )
+
+    if sal_col:
+        plot_single_ts(
+            df,
+            outdir / "ts_salinity.png",
+            title=f"{title_prefix}Salinity" + (f" (smooth {smooth_all})" if smooth_all else ""),
+            col=sal_col,
+            ylabel="Salinity (PSU)",
+            smooth_window=smooth_all,
+            markers=markers,  # NEW
+        )
+
+    if wspd_col:
+        plot_single_ts(
+            df,
+            outdir / "ts_wind_speed.png",
+            title=f"{title_prefix}Wind speed" + (f" (smooth {smooth_all})" if smooth_all else ""),
+            col=wspd_col,
+            ylabel="Wind speed (m/s)",
+            smooth_window=smooth_all,
+            markers=markers,  # NEW
+        )
+
+    if vort_col:
+        plot_single_ts(
+            df,
+            outdir / "ts_vorticity.png",
+            title=f"{title_prefix}Vorticity" + (f" (smooth {smooth_all})" if smooth_all else ""),
+            col=vort_col,
+            ylabel="Vorticity (1/s)",
+            smooth_window=smooth_all,
+            markers=markers,  # NEW
+        )
+
+    if strain_col:
+        plot_single_ts(
+            df,
+            outdir / "ts_strain.png",
+            title=f"{title_prefix}Strain" + (f" (smooth {smooth_all})" if smooth_all else ""),
+            col=strain_col,
+            ylabel="Strain (1/s)",
+            smooth_window=smooth_all,
+            markers=markers,  # NEW
+        )
+    
+    if rot_col:
+        rot_window = rot_smooth or smooth_all
+        suffix = f"_smooth_{rot_window}" if rot_window else ""
+        plot_single_ts(
+            df,
+            outdir / f"ts_rotation_index{suffix}.png",
+            title=f"{title_prefix}Rotation index" + (f" (smooth {rot_window})" if rot_window else ""),
+            col=rot_col,
+            ylabel="Rotation index (-)",
+            smooth_window=rot_window,
+            markers=markers,  # NEW
+        )
+
+    if curv_col:
+        plot_single_ts(
+            df,
+            outdir / "ts_curvature.png",
+            title=f"{title_prefix}Curvature" + (f" (smooth {smooth_all})" if smooth_all else ""),
+            col=curv_col,
+            ylabel="Curvature (m$^{-1}$)",
+            smooth_window=smooth_all,
+            markers=markers,  # NEW
+        )
+
+    if curv_s_col:
+        plot_single_ts(
+            df,
+            outdir / "ts_curvature_signed.png",
+            title=f"{title_prefix}Signed curvature" + (f" (smooth {smooth_all})" if smooth_all else ""),
+            col=curv_s_col,
+            ylabel="Signed curvature (m$^{-1}$)",
+            smooth_window=smooth_all,
+            markers=markers,  # NEW
+        )
+
+    if ow_col:
+        plot_single_ts(
+            df,
+            outdir / "ts_okubo_weiss.png",
+            title=f"{title_prefix}Okubo–Weiss" + (f" (smooth {smooth_all})" if smooth_all else ""),
+            col=ow_col,
+            ylabel="Okubo–Weiss (1/s$^2$)",
+            smooth_window=smooth_all,
+            markers=markers,  # NEW
+        )
+
+    if do2_raw_col:
+        plot_single_ts(
+            df,
+            outdir / "ts_oxygen_DO2_raw.png",
+            title=f"{title_prefix}DO2 (raw counts)" + (f" (smooth {smooth_all})" if smooth_all else ""),
+            col=do2_raw_col,
+            ylabel="DO2 (counts)",
+            smooth_window=smooth_all,
+            markers=markers,
+        )
+
+    if do2_mgl_col:
+        plot_single_ts(
+            df,
+            outdir / "ts_oxygen_mgL.png",
+            title=f"{title_prefix}Oxygen (mg/L)" + (f" (smooth {smooth_all})" if smooth_all else ""),
+            col=do2_mgl_col,
+            ylabel="Oxygen (mg/L)",
+            smooth_window=smooth_all,
+            markers=markers,
+        )
 # ----------------------------
 # Plot 1: Cartopy trajectory map (PlateCarree) + vorticity colors + wind arrows
 # ----------------------------
@@ -112,13 +361,15 @@ def plot_trajectory_cartopy(
     title_prefix: str = "",
     decimate_quiver: int = 10,
     vort_clip_quantiles: tuple[float, float] = (0.02, 0.98),
+    mark_every_days: int = 7,
+    mark_size: float = 45.0,
+    markers: pd.DataFrame | None = None,
 ) -> None:
     outdir.mkdir(parents=True, exist_ok=True)
 
     if not {"lat", "lon"}.issubset(df.columns):
         return
 
-    # imports are inside so script still runs without viz extras (it will just fail here if called)
     import cartopy.crs as ccrs
     import cartopy.feature as cfeature
 
@@ -159,7 +410,7 @@ def plot_trajectory_cartopy(
             crs=ccrs.PlateCarree(),
         )
 
-    # Trajectory (colored)
+    # Trajectory (colored by vorticity if available)
     if vort_col and df[vort_col].notna().any():
         vv = df[vort_col].to_numpy()
         vmin, vmax = np.nanquantile(vv, vort_clip_quantiles)
@@ -178,6 +429,80 @@ def plot_trajectory_cartopy(
     else:
         ax.plot(lon, lat, transform=ccrs.PlateCarree(), zorder=3)
 
+
+    # Markers every N days (numbered)
+    if "time_utc" in df.columns and mark_every_days and mark_every_days > 0:
+        mk = (
+            df[["time_utc", "lon", "lat"]]
+            .dropna(subset=["time_utc", "lon", "lat"])
+            .sort_values("time_utc")
+            .set_index("time_utc")
+            .resample(f"{int(mark_every_days)}D")
+            .first()
+            .dropna(subset=["lon", "lat"])
+            .reset_index()
+        )
+
+    # Numbered markers (provided externally so they match TS)
+    if markers is not None and not markers.empty:
+        for r in markers.itertuples(index=False):
+            ax.scatter(
+                r.lon,
+                r.lat,
+                s=mark_size,
+                marker="o",
+                facecolors="none",
+                edgecolors="black",
+                linewidths=1.2,
+                transform=ccrs.PlateCarree(),
+                zorder=5,
+            )
+            ax.annotate(
+                str(r.marker_id),
+                xy=(r.lon, r.lat),
+                xycoords=ccrs.PlateCarree()._as_mpl_transform(ax),
+                xytext=(0, 5),
+                textcoords="offset points",
+                fontsize=9,
+                weight="bold",
+                ha="center",
+                va="bottom",
+                zorder=6,
+            )
+
+
+    # Start / End markers
+    if "time_utc" in df.columns:
+        df_sorted = df.dropna(subset=["lon", "lat", "time_utc"]).sort_values("time_utc")
+        if not df_sorted.empty:
+            start_row = df_sorted.iloc[0]
+            end_row = df_sorted.iloc[-1]
+
+            ax.scatter(
+                start_row["lon"],
+                start_row["lat"],
+                marker="^",
+                s=90,
+                color="green",
+                edgecolor="black",
+                linewidth=0.8,
+                transform=ccrs.PlateCarree(),
+                zorder=6,
+                label="Start",
+            )
+            ax.scatter(
+                end_row["lon"],
+                end_row["lat"],
+                marker="X",
+                s=90,
+                color="red",
+                edgecolor="black",
+                linewidth=0.8,
+                transform=ccrs.PlateCarree(),
+                zorder=6,
+                label="End",
+            )
+
     # Wind arrows (decimated)
     if wspd_col and wdir_col:
         sub = df.iloc[:: max(1, decimate_quiver)].copy()
@@ -193,18 +518,24 @@ def plot_trajectory_cartopy(
                 zorder=4,
                 angles="xy",
                 scale_units="xy",
-                scale=25,          # aumenta → frecce più corte
-                width=0.005,      # ↓ più piccolo = più fine
+                scale=25,
+                width=0.0025,
                 headwidth=3,
                 headlength=4,
                 headaxislength=3.5,
                 alpha=0.8,
             )
 
+    # Legend (only if something has labels)
+    handles, labels = ax.get_legend_handles_labels()
+    if labels:
+        ax.legend(loc="upper left", frameon=True, fontsize=9)
+
     ax.set_title(f"{title_prefix}Trajectory")
     plt.tight_layout()
     fig.savefig(outdir / "map_trajectory_cartopy.png", dpi=200)
     plt.close(fig)
+
 
 
 # ----------------------------
@@ -244,175 +575,6 @@ def plot_wind_rose_pkg(
     plt.close(fig)
 
 
-def plot_time_series_pair(
-    df: pd.DataFrame,
-    outpath: Path,
-    *,
-    title: str,
-    y1_col: str,
-    y1_label: str,
-    y2_col: str | None = None,
-    y2_label: str | None = None,
-    time_col: str = "time_utc",
-    smooth_points: int = 0,
-) -> None:
-    """
-    Plot two variables on the same time axis, using a secondary y-axis if needed.
-    Saves a single PNG to outpath.
-    """
-    dff = df.copy()
-
-    cols_to_smooth = [y1_col] + ([y2_col] if y2_col else [])
-    cols_to_smooth = [c for c in cols_to_smooth if c and c in dff.columns]
-
-    if smooth_points and smooth_points > 1:
-        for c in cols_to_smooth:
-            dff[c] = dff[c].rolling(smooth_points, min_periods=1).mean()
-
-    t = dff[time_col]
-
-    fig = plt.figure(figsize=(12.5, 5.2))
-    ax1 = plt.gca()
-    ax1.grid(True, which="both", alpha=0.35)
-
-    # y1
-    if y1_col not in dff.columns:
-        plt.close(fig)
-        return
-    l1 = ax1.plot(t, dff[y1_col], linewidth=1.4, label=y1_label)[0]
-    ax1.set_ylabel(y1_label)
-
-    lines = [l1]
-    labels = [y1_label]
-
-    # y2
-    if y2_col and (y2_col in dff.columns):
-        ax2 = ax1.twinx()
-        l2 = ax2.plot(t, dff[y2_col], linewidth=1.2, linestyle="--", label=y2_label or y2_col)[0]
-        ax2.set_ylabel(y2_label or y2_col)
-        lines.append(l2)
-        labels.append(y2_label or y2_col)
-    else:
-        ax2 = None
-
-    ax1.set_xlabel("Time (UTC)")
-    ax1.set_title(title)
-
-    # compact legend
-    ax1.legend(lines, labels, loc="upper left", frameon=False, fontsize=9)
-
-    plt.tight_layout()
-    fig.savefig(outpath, dpi=200)
-    plt.close(fig)
-
-
-def plot_time_series_pairs(
-    df: pd.DataFrame,
-    outdir: Path,
-    *,
-    title_prefix: str = "",
-    smooth_points: int = 0,
-) -> None:
-    """
-    Produce a small set of readable paired time series plots.
-    """
-    outdir.mkdir(parents=True, exist_ok=True)
-
-    # choose available columns
-    sst = "sst_c" if "sst_c" in df.columns else None
-    sal = "salinity_psu" if "salinity_psu" in df.columns else None
-    vort = "vorticity" if "vorticity" in df.columns else None
-    rot = "rotation_index" if "rotation_index" in df.columns else None
-    wspd = pick_first_existing(df, ["wspd_mean", "wspd"])
-
-    # 1) SST + Salinity
-    if sst and sal:
-        plot_time_series_pair(
-            df,
-            outdir / "ts_sst_salinity.png",
-            title=f"{title_prefix}SST & Salinity",
-            y1_col=sst,
-            y1_label="SST (°C)",
-            y2_col=sal,
-            y2_label="Salinity (PSU)",
-            smooth_points=smooth_points,
-        )
-    elif sst:
-        plot_time_series_pair(
-            df,
-            outdir / "ts_sst.png",
-            title=f"{title_prefix}SST",
-            y1_col=sst,
-            y1_label="SST (°C)",
-            smooth_points=smooth_points,
-        )
-    elif sal:
-        plot_time_series_pair(
-            df,
-            outdir / "ts_salinity.png",
-            title=f"{title_prefix}Salinity",
-            y1_col=sal,
-            y1_label="Salinity (PSU)",
-            smooth_points=smooth_points,
-        )
-
-    # 2) Wind speed + Rotation index
-    if wspd and rot:
-        plot_time_series_pair(
-            df,
-            outdir / "ts_wind_rotation.png",
-            title=f"{title_prefix}Wind speed & Rotation index",
-            y1_col=wspd,
-            y1_label="Wind speed (m/s)",
-            y2_col=rot,
-            y2_label="Rotation index (-)",
-            smooth_points=smooth_points,
-        )
-    elif wspd:
-        plot_time_series_pair(
-            df,
-            outdir / "ts_wind.png",
-            title=f"{title_prefix}Wind speed",
-            y1_col=wspd,
-            y1_label="Wind speed (m/s)",
-            smooth_points=smooth_points,
-        )
-    elif rot:
-        plot_time_series_pair(
-            df,
-            outdir / "ts_rotation.png",
-            title=f"{title_prefix}Rotation index",
-            y1_col=rot,
-            y1_label="Rotation index (-)",
-            smooth_points=smooth_points,
-        )
-
-    # 3) Vorticity + Rotation index (optional but useful)
-    if vort and rot:
-        plot_time_series_pair(
-            df,
-            outdir / "ts_vorticity_rotation.png",
-            title=f"{title_prefix}Vorticity & Rotation index",
-            y1_col=vort,
-            y1_label="Vorticity (1/s)",
-            y2_col=rot,
-            y2_label="Rotation index (-)",
-            smooth_points=smooth_points,
-        )
-    elif vort:
-        plot_time_series_pair(
-            df,
-            outdir / "ts_vorticity.png",
-            title=f"{title_prefix}Vorticity",
-            y1_col=vort,
-            y1_label="Vorticity (1/s)",
-            smooth_points=smooth_points,
-        )
-
-
-
-
-
 # ----------------------------
 # Extra: quick gaps + availability report
 # ----------------------------
@@ -435,6 +597,11 @@ def write_quick_report(df: pd.DataFrame, outdir: Path) -> None:
         "v",
         "vorticity",
         "strain",
+        "curvature_m1",
+        "curvature_signed_m1",
+        "okubo_weiss",
+        "DO2_c",
+        "oxy_comp_mgL_c",
     ]
     avail = {c: int(df[c].notna().sum()) for c in cols if c in df.columns}
 
@@ -469,11 +636,15 @@ def main() -> int:
     ap.add_argument("--decimate-quiver", type=int, default=10, help="Keep 1 every N points for wind arrows")
     ap.add_argument("--no-zero-sst", action="store_true", help="Treat SST==0 as NaN (fill-value behavior)")
     ap.add_argument("--sst-fill", default="-5.0", help="Comma-separated SST fill values to mask (e.g. -5, -999)")
-    ap.add_argument("--smooth", type=int, default=0, help="Rolling mean window (points) for time series (0 disables)")
+    ap.add_argument("--smooth-all", default="", help="Time-based rolling mean window applied to ALL time series (e.g. '6H', '30min', '1D'). Empty disables.")
+    ap.add_argument("--rot-smooth", default="", help="Time-based rolling mean window applied only to rotation_index (overrides --smooth-all for rotation). Empty disables.")
+    ap.add_argument("--mark-every-days", type=int, default=7)
     args = ap.parse_args()
 
     outdir = Path(args.outdir)
     df = read_master(args.input)
+    smooth_all = args.smooth_all.strip() or None
+    rot_smooth = args.rot_smooth.strip() or None
 
     fill_vals = tuple(float(x.strip()) for x in str(args.sst_fill).split(",") if x.strip())
     df = apply_basic_masks(
@@ -488,17 +659,19 @@ def main() -> int:
 
     write_quick_report(df, outdir)
 
-    # 1) Single time-series figure
-    plot_time_series_pairs(df, outdir, title_prefix=title_prefix, smooth_points=args.smooth)
+    markers = compute_time_markers(df, every_days=args.mark_every_days)
 
-    # 2) Cartopy map
+    # Time series: single plots
+    plot_time_series_singles(df, outdir, title_prefix=title_prefix, smooth_all=smooth_all, rot_smooth=rot_smooth, markers=markers)
+
+    # Cartopy map
     try:
-        plot_trajectory_cartopy(df, outdir, title_prefix=title_prefix, decimate_quiver=args.decimate_quiver)
+        plot_trajectory_cartopy(df, outdir, title_prefix=title_prefix, decimate_quiver=args.decimate_quiver, markers=markers)
     except ModuleNotFoundError as e:
         print("Cartopy not installed. Install extras: pip install -e '.[viz]'")
         print(f"Reason: {e}")
 
-    # 3) Wind rose (windrose package)
+    # Wind rose
     try:
         plot_wind_rose_pkg(df, outdir, title_prefix=title_prefix)
     except ModuleNotFoundError as e:
@@ -517,9 +690,51 @@ if __name__ == "__main__":
 Example:
 
 python src/bgcd/plot_master.py `
-  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_master/master_300534065378180.csv" `
-  --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots/300534065378180" `
+  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_master/master_300534065470010.csv" `
+  --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots/300534065470010" `
   --no-zero-sst `
-  --decimate-quiver 10 `
-  --smooth 0
+  --decimate-quiver 7 `
+  --rot-smooth 2H `
+  --smooth-all 6H
+  --mark-every-days 7
+
+python src/bgcd/plot_master.py `
+   --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_master/master_300534065378180.csv" `
+   --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots/300534065378180" `
+   --no-zero-sst `
+   --decimate-quiver 7 `
+   --smooth-all 12h `
+   --rot-smooth 24h `
+   --mark-every-days 3  
+python src/bgcd/plot_master.py `
+   --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_master/master_300534065470010.csv" `
+   --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots/300534065470010" `
+   --no-zero-sst `
+   --decimate-quiver 7 `
+   --smooth-all 12h `
+   --rot-smooth 24h `
+   --mark-every-days 3  
+python src/bgcd/plot_master.py `
+   --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_master/master_300534065379230.csv" `
+   --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots/300534065379230" `
+   --no-zero-sst `
+   --decimate-quiver 7 `
+   --smooth-all 12h `
+   --rot-smooth 24h `
+   --mark-every-days 3  
+
+   
+
+
+# nessuno smoothing
+python src/bgcd/plot_master.py --input "...csv" --outdir "..."
+
+# smoothing 6H su tutte le TS
+python src/bgcd/plot_master.py --input "...csv" --outdir "..." --smooth-all 6H
+
+# smoothing 6H su tutto, ma rotation più smooth (24H)
+python src/bgcd/plot_master.py --input "...csv" --outdir "..." --smooth-all 6H --rot-smooth 24H
+
+# smoothing 30 minuti (se hai dati molto fitti)
+python src/bgcd/plot_master.py --input "...csv" --outdir "..." --smooth-all 30min
 """
