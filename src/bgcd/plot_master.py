@@ -3,11 +3,23 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-
+from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 
+import matplotlib as mpl
+
+fontSize=22
+mpl.rcParams.update({
+    "font.size": fontSize,          # dimensione base
+    "axes.titlesize": fontSize,     # titolo del plot
+    "axes.labelsize": fontSize,     # etichette assi
+    "xtick.labelsize": fontSize,    # numeri asse X
+    "ytick.labelsize": fontSize,    # numeri asse Y
+    "legend.fontsize": fontSize,    # legenda
+})
 
 # ----------------------------
 # Loading + light QC
@@ -86,6 +98,50 @@ def clip_series_quantile(series: pd.Series, qlow: float = 0.01, qhigh: float = 0
     hi = s.quantile(qhigh)
     return s.clip(lower=lo, upper=hi)
 
+def compute_hourly_climatology_mean(
+    t: pd.Series,
+    y: pd.Series,
+    *,
+    min_samples_per_hour: int = 3,
+) -> pd.Series:
+    """
+    Compute mean value for each hour-of-day (0..23) across the whole record.
+    Returns a Series indexed by hour (0..23) with NaN where not enough samples.
+    """
+    tt = pd.to_datetime(t, errors="coerce")
+    tmp = pd.DataFrame({"t": tt, "y": y}).dropna(subset=["t", "y"])
+    if tmp.empty:
+        return pd.Series(index=np.arange(24), dtype=float)
+
+    hours = tmp["t"].dt.hour
+    g = tmp["y"].groupby(hours)
+    mean_by_hour = g.mean().reindex(np.arange(24))
+    count_by_hour = g.size().reindex(np.arange(24)).fillna(0).astype(int)
+
+    mean_by_hour[count_by_hour < int(min_samples_per_hour)] = np.nan
+    return mean_by_hour
+
+
+def hourly_anomaly(
+    t: pd.Series,
+    y: pd.Series,
+    *,
+    min_samples_per_hour: int = 3,
+) -> pd.Series:
+    """
+    y(t) - mean(y | hour-of-day), computed over the whole time series.
+    """
+    tt = pd.to_datetime(t, errors="coerce")
+    clim = compute_hourly_climatology_mean(tt, y, min_samples_per_hour=min_samples_per_hour)
+    h = tt.dt.hour
+    return y - h.map(clim)
+
+
+@dataclass(frozen=True)
+class AnomalyOpts:
+    enabled: bool = False
+    min_samples_per_hour: int = 3
+
 def wind_dirspeed_to_uv(wdir_deg: np.ndarray, wspd: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """
     Convert meteorological direction (deg FROM which wind is coming, clockwise from North)
@@ -154,7 +210,9 @@ def plot_single_ts(
     ylabel: str,
     time_col: str = "time_utc",
     smooth_window: str | None = None,
-    markers: pd.DataFrame | None = None,  # NEW
+    markers: pd.DataFrame | None = None,
+    anomaly: AnomalyOpts = AnomalyOpts(),
+    logy: bool = False,
 ) -> None:
     """
     Plot one variable vs time.
@@ -172,39 +230,135 @@ def plot_single_ts(
     if col in ("DO2_c", "oxy_comp_mgL_c"):
         y = clip_series_quantile(y, 0.01, 0.99)
 
+    # keep original (after clipping but before smoothing)
+    y_raw = y.copy()
+
+    # compute anomaly on raw signal
+    y_anom = None
+    if anomaly.enabled:
+        y_anom = hourly_anomaly(
+            t,
+            y_raw,
+            min_samples_per_hour=anomaly.min_samples_per_hour,
+        )
+
+    # now apply smoothing (if requested)
     if smooth_window:
-        y_sm = rolling_time_mean(y, t, smooth_window)
+        y_sm = rolling_time_mean(y_raw, t, smooth_window)
         y = pd.Series(y_sm, index=y.index)
+
+        if anomaly.enabled and y_anom is not None:
+            y_anom_sm = rolling_time_mean(y_anom, t, smooth_window)
+            y_anom = pd.Series(y_anom_sm, index=y.index)
+    else:
+        y = y_raw
 
     fig = plt.figure(figsize=(12.5, 4.8))
     ax = plt.gca()
     ax.grid(True, which="both", alpha=0.35)
 
-    ax.plot(t, y, linewidth=1.3)
-    # Vertical marker lines (same IDs as map)
-    if markers is not None and not markers.empty:
-        # put labels near the top of the axes (in axes coordinates)
-        for r in markers.itertuples(index=False):
-            ax.axvline(r.time_utc, linewidth=0.8, alpha=0.25)
+    # --- Main signal ---
+    main_color = ax._get_lines.get_next_color()
+    line_main, = ax.plot(
+        t,
+        y,
+        linewidth=1.3,
+        color=main_color,
+        label="Signal",
+    )
+
+    legend_handles = [line_main]
+    legend_labels = ["Signal"]
+
+    ax2 = None
+
+    # --- Hourly anomaly on right axis ---
+    if anomaly.enabled and y_anom is not None and pd.Series(y_anom).notna().any():
+        # IMPORTANT: anomaly + logy non vanno d'accordo (anomaly può essere negativa)
+        ax2 = ax.twinx()
+        anom_color = ax._get_lines.get_next_color()
+
+        line_anom, = ax2.plot(
+            t,
+            y_anom,
+            linewidth=1.3,
+            linestyle="--",
+            color=anom_color,
+            label="Hourly anomaly",
+        )
+
+        ax2.axhline(0.0, linewidth=0.9, alpha=0.35)
+        ax2.set_ylabel(f"{ylabel} anomaly")
+
+        legend_handles.append(line_anom)
+        legend_labels.append("Hourly anomaly")
+
+    # --- Legend (single, clean) ---
+    ax.legend(
+        legend_handles,
+        legend_labels,
+        loc="upper left",
+        fontsize=fontSize,
+        frameon=True,
+        framealpha=0.85,
+    )
+
+    # ------------------------------------------------------------------
+    # Vertical marker lines (every 15 days)
+    # ------------------------------------------------------------------
+    if t.notna().any():
+        tmin = pd.to_datetime(t.min())
+        tmax = pd.to_datetime(t.max())
+
+        # primo marker allineato al giorno intero
+        start = tmin.normalize()
+
+        marker_times = pd.date_range(start=start, end=tmax, freq="15D")
+
+        for i, mt in enumerate(marker_times, start=1):
+            ax.axvline(mt, linewidth=0.9, alpha=0.25)
+
             ax.annotate(
-                str(r.marker_id),
-                xy=(r.time_utc, 1.0),
+                str(i),
+                xy=(mt, 1.0),
                 xycoords=("data", "axes fraction"),
                 xytext=(2, -2),
                 textcoords="offset points",
-                fontsize=8,
+                fontsize=fontSize,
                 ha="left",
                 va="top",
                 alpha=0.75,
             )
-    
+
+        # Allinea anche le xticks ogni 15 giorni
+        ax.xaxis.set_major_locator(mdates.DayLocator(interval=15))
+        ax.xaxis.set_minor_locator(mdates.DayLocator(interval=1))
+
     ax.set_title(title)
     ax.set_xlabel("Time (UTC)")
     ax.set_ylabel(ylabel)
 
+    if logy:
+        # usa la serie effettivamente plottata (y) per stimare bottom, non df[col]
+        y_series = pd.Series(y)
+        y_positive = y_series[y_series > 0]
+        if not y_positive.empty:
+            ax.set_ylim(bottom=float(y_positive.min()) * 0.5)
+        ax.set_yscale("log")
+
+    # formatter senza anno
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d-%b"))
+    if ax2 is not None:
+        ax2.xaxis.set_major_formatter(mdates.DateFormatter("%d-%b"))
+
+    # piccola rotazione per evitare collisioni se ci sono tanti tick
+    # plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
+    plt.setp(ax.get_xticklabels(), ha="right")
+
     plt.tight_layout()
     fig.savefig(outpath, dpi=200)
     plt.close(fig)
+
 
 def plot_time_series_singles(
     df: pd.DataFrame,
@@ -214,6 +368,7 @@ def plot_time_series_singles(
     smooth_all: str | None = None,
     rot_smooth: str | None = None,
     markers: pd.DataFrame | None = None,  # NEW
+    anomaly: AnomalyOpts = AnomalyOpts(),
 ) -> None:
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -228,6 +383,8 @@ def plot_time_series_singles(
     ow_col     = "okubo_weiss"         if "okubo_weiss" in df.columns else None
     do2_raw_col = "DO2_c" if "DO2_c" in df.columns else None
     do2_mgl_col = "oxy_comp_mgL_c" if "oxy_comp_mgL_c" in df.columns else None
+    bbp470_col = "bbp_470_m1" if "bbp_470_m1" in df.columns else None
+    bbp532_col = "bbp_532_m1" if "bbp_532_m1" in df.columns else None
 
     if sst_col:
         plot_single_ts(
@@ -238,6 +395,7 @@ def plot_time_series_singles(
             ylabel="SST (°C)",
             smooth_window=smooth_all,
             markers=markers,  # NEW
+            anomaly=anomaly,
         )
 
     if sal_col:
@@ -249,6 +407,7 @@ def plot_time_series_singles(
             ylabel="Salinity (PSU)",
             smooth_window=smooth_all,
             markers=markers,  # NEW
+            anomaly=anomaly,
         )
 
     if wspd_col:
@@ -260,6 +419,7 @@ def plot_time_series_singles(
             ylabel="Wind speed (m/s)",
             smooth_window=smooth_all,
             markers=markers,  # NEW
+            anomaly=anomaly,
         )
 
     if vort_col:
@@ -271,6 +431,7 @@ def plot_time_series_singles(
             ylabel="Vorticity (1/s)",
             smooth_window=smooth_all,
             markers=markers,  # NEW
+            anomaly=anomaly,
         )
 
     if strain_col:
@@ -282,6 +443,7 @@ def plot_time_series_singles(
             ylabel="Strain (1/s)",
             smooth_window=smooth_all,
             markers=markers,  # NEW
+            anomaly=anomaly,
         )
     
     if rot_col:
@@ -295,6 +457,7 @@ def plot_time_series_singles(
             ylabel="Rotation index (-)",
             smooth_window=rot_window,
             markers=markers,  # NEW
+            anomaly=anomaly,
         )
 
     if curv_col:
@@ -306,6 +469,7 @@ def plot_time_series_singles(
             ylabel="Curvature (m$^{-1}$)",
             smooth_window=smooth_all,
             markers=markers,  # NEW
+            anomaly=anomaly,
         )
 
     if curv_s_col:
@@ -317,6 +481,7 @@ def plot_time_series_singles(
             ylabel="Signed curvature (m$^{-1}$)",
             smooth_window=smooth_all,
             markers=markers,  # NEW
+            anomaly=anomaly,
         )
 
     if ow_col:
@@ -328,6 +493,7 @@ def plot_time_series_singles(
             ylabel="Okubo–Weiss (1/s$^2$)",
             smooth_window=smooth_all,
             markers=markers,  # NEW
+            anomaly=anomaly,
         )
 
     if do2_raw_col:
@@ -339,6 +505,7 @@ def plot_time_series_singles(
             ylabel="DO2 (counts)",
             smooth_window=smooth_all,
             markers=markers,
+            anomaly=anomaly,
         )
 
     if do2_mgl_col:
@@ -350,6 +517,33 @@ def plot_time_series_singles(
             ylabel="Oxygen (mg/L)",
             smooth_window=smooth_all,
             markers=markers,
+            anomaly=anomaly,
+        )
+
+    if bbp470_col:
+        plot_single_ts(
+            df,
+            outdir / "ts_bbp_470.png",
+            title=f"{title_prefix}BBP 470 nm" + (f" (smooth {smooth_all})" if smooth_all else ""),
+            col=bbp470_col,
+            ylabel="bbp (m$^{-1}$)",
+            smooth_window=smooth_all,
+            markers=markers,
+            anomaly=anomaly,
+            logy=False,
+        )
+
+    if bbp532_col:
+        plot_single_ts(
+            df,
+            outdir / "ts_bbp_532.png",
+            title=f"{title_prefix}BBP 532 nm" + (f" (smooth {smooth_all})" if smooth_all else ""),
+            col=bbp532_col,
+            ylabel="bbp (m$^{-1}$)",
+            smooth_window=smooth_all,
+            markers=markers,
+            anomaly=anomaly,
+            logy=False,
         )
 # ----------------------------
 # Plot 1: Cartopy trajectory map (PlateCarree) + vorticity colors + wind arrows
@@ -463,7 +657,7 @@ def plot_trajectory_cartopy(
                 xycoords=ccrs.PlateCarree()._as_mpl_transform(ax),
                 xytext=(0, 5),
                 textcoords="offset points",
-                fontsize=9,
+                fontsize=fontSize,
                 weight="bold",
                 ha="center",
                 va="bottom",
@@ -529,7 +723,7 @@ def plot_trajectory_cartopy(
     # Legend (only if something has labels)
     handles, labels = ax.get_legend_handles_labels()
     if labels:
-        ax.legend(loc="upper left", frameon=True, fontsize=9)
+        ax.legend(loc="upper left", frameon=True, fontsize=fontSize)
 
     ax.set_title(f"{title_prefix}Trajectory")
     plt.tight_layout()
@@ -602,6 +796,8 @@ def write_quick_report(df: pd.DataFrame, outdir: Path) -> None:
         "okubo_weiss",
         "DO2_c",
         "oxy_comp_mgL_c",
+        "bbp_470_m1",
+        "bbp_532_m1",
     ]
     avail = {c: int(df[c].notna().sum()) for c in cols if c in df.columns}
 
@@ -639,6 +835,8 @@ def main() -> int:
     ap.add_argument("--smooth-all", default="", help="Time-based rolling mean window applied to ALL time series (e.g. '6H', '30min', '1D'). Empty disables.")
     ap.add_argument("--rot-smooth", default="", help="Time-based rolling mean window applied only to rotation_index (overrides --smooth-all for rotation). Empty disables.")
     ap.add_argument("--mark-every-days", type=int, default=7)
+    ap.add_argument("--with-hourly-anomaly", action="store_true", help="Add hour-of-day anomaly on a right Y axis (y - mean(y|hour)).")
+    ap.add_argument("--anom-min-samples-per-hour", type=int, default=3, help="Minimum samples per hour-of-day to compute the hour mean (otherwise anomaly is NaN for that hour).")
     args = ap.parse_args()
 
     outdir = Path(args.outdir)
@@ -660,9 +858,13 @@ def main() -> int:
     write_quick_report(df, outdir)
 
     markers = compute_time_markers(df, every_days=args.mark_every_days)
+    anomaly_opts = AnomalyOpts(
+        enabled=bool(args.with_hourly_anomaly),
+        min_samples_per_hour=int(args.anom_min_samples_per_hour),
+    )
 
     # Time series: single plots
-    plot_time_series_singles(df, outdir, title_prefix=title_prefix, smooth_all=smooth_all, rot_smooth=rot_smooth, markers=markers)
+    plot_time_series_singles(df, outdir, title_prefix=title_prefix, smooth_all=smooth_all, rot_smooth=rot_smooth, markers=markers, anomaly=anomaly_opts)
 
     # Cartopy map
     try:
@@ -705,7 +907,9 @@ python src/bgcd/plot_master.py `
    --decimate-quiver 7 `
    --smooth-all 12h `
    --rot-smooth 24h `
-   --mark-every-days 3  
+   --mark-every-days 7 `
+   --with-hourly-anomaly `
+   --anom-min-samples-per-hour 3
 python src/bgcd/plot_master.py `
    --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_master/master_300534065470010.csv" `
    --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots/300534065470010" `
@@ -713,7 +917,9 @@ python src/bgcd/plot_master.py `
    --decimate-quiver 7 `
    --smooth-all 12h `
    --rot-smooth 24h `
-   --mark-every-days 3  
+   --mark-every-days 7 `
+   --with-hourly-anomaly `
+   --anom-min-samples-per-hour 3
 python src/bgcd/plot_master.py `
    --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_master/master_300534065379230.csv" `
    --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots/300534065379230" `
@@ -721,7 +927,9 @@ python src/bgcd/plot_master.py `
    --decimate-quiver 7 `
    --smooth-all 12h `
    --rot-smooth 24h `
-   --mark-every-days 3  
+   --mark-every-days 7 `
+   --with-hourly-anomaly `
+   --anom-min-samples-per-hour 3
 
    
 

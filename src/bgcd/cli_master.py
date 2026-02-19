@@ -41,6 +41,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--oxygen-tolerance", default="30min", help="merge_asof tolerance for oxygen onto base timeline.")
     p.add_argument("--oxygen-cols", nargs="+", default=["DO2_c", "oxy_comp_mgL_c"], help="Oxygen columns to merge into master (easy to extend).")
 
+    p.add_argument("--bbp-db-dir", default=None, help="Directory containing bbp_<pid>.csv|parquet")
+    p.add_argument("--bbp-tolerance", default="30min", help="merge_asof tolerance for bbp onto base timeline.")
+    p.add_argument("--bbp-cols", nargs="+", default=["bbp_470_m1", "bbp_532_m1"], help="BBP columns to merge into master.")
+
+
     return p.parse_args(argv)
 
 
@@ -96,6 +101,17 @@ def main(argv: list[str] | None = None) -> int:
                 base_name="oxygen",
                 tolerance=args.oxygen_tolerance,
                 keep_cols=args.oxygen_cols,
+            )
+        )
+
+    if args.bbp_db_dir:
+        extra_db_dirs["bbp"] = args.bbp_db_dir
+        extras.append(
+            ExtraSource(
+                name="bbp",
+                base_name="bbp",
+                tolerance=args.bbp_tolerance,
+                keep_cols=args.bbp_cols,
             )
         )
 
@@ -219,6 +235,29 @@ python -m bgcd.cli_master `
   --with-dt `
   --segment-filter `
   --segment-max-gap 7D
+
+MASTER con anche BBP
+python -m bgcd.cli_master `
+  --platform-id 300534065378180 `
+  --platform-id 300534065379230 `
+  --platform-id 300534065470010 `
+  --drifter-db-dir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_drifter" `
+  --wind-db-dir    "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_wind" `
+  --mat-db-dir     "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_mat" `
+  --oxygen-db-dir  "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_oxygen" `
+  --oxygen-cols DO2_c oxy_comp_mgL_c `
+  --oxygen-tolerance 30min `
+  --bbp-db-dir     "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_bbp" `
+  --bbp-cols bbp_470_m1 bbp_532_m1 `
+  --bbp-tolerance 30min `
+  --output-dir     "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_master" `
+  --format csv `
+  --target-time drifter `
+  --mode per-platform `
+  --with-dt `
+  --segment-filter `
+  --segment-max-gap 7D
+
 
 PER AGGIUNGERE COLONNE> --oxygen-cols DO2_c oxy_comp_mgL_c oxy_comp_saturation_c TdegC_c
 """
