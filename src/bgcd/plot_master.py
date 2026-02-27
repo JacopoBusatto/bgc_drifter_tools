@@ -130,17 +130,89 @@ def hourly_anomaly(
 ) -> pd.Series:
     """
     y(t) - mean(y | hour-of-day), computed over the whole time series.
+
+    Implementation uses an explicit hour_of_day column and a join-like mapping
+    of the hourly climatology back onto each sample.
     """
     tt = pd.to_datetime(t, errors="coerce")
+
+    # Build hourly climatology (index: 0..23)
     clim = compute_hourly_climatology_mean(tt, y, min_samples_per_hour=min_samples_per_hour)
-    h = tt.dt.hour
-    return y - h.map(clim)
+
+    # Build per-sample hour_of_day
+    hour_of_day = tt.dt.hour
+
+    # "Join" hourly mean onto each row (map is equivalent to a join on hour key)
+    hourly_mean_at_t = hour_of_day.map(clim)
+
+    return y - hourly_mean_at_t
 
 
 @dataclass(frozen=True)
 class AnomalyOpts:
     enabled: bool = False
     min_samples_per_hour: int = 3
+
+
+@dataclass(frozen=True)
+class ActiveWindow:
+    start: pd.Timestamp | None
+    end: pd.Timestamp | None
+    per_col: dict[str, tuple[pd.Timestamp | None, pd.Timestamp | None]]
+
+
+def compute_common_active_window(
+    df: pd.DataFrame,
+    cols: list[str],
+    *,
+    time_col: str = "time_utc",
+    min_valid: int = 10,
+) -> ActiveWindow:
+    """
+    Common overlap window where ALL cols have non-NaN values.
+    start = max(first_valid[col])
+    end   = min(last_valid[col])
+
+    A column is considered only if it exists and has >= min_valid points.
+    """
+    t = pd.to_datetime(df[time_col], errors="coerce")
+
+    per: dict[str, tuple[pd.Timestamp | None, pd.Timestamp | None]] = {}
+    firsts: list[pd.Timestamp] = []
+    lasts: list[pd.Timestamp] = []
+
+    for c in cols:
+        if c not in df.columns:
+            per[c] = (None, None)
+            continue
+
+        s = pd.to_numeric(df[c], errors="coerce")
+        ok = t.notna() & s.notna()
+        if int(ok.sum()) < int(min_valid):
+            per[c] = (None, None)
+            continue
+
+        tt = t[ok]
+        f = pd.Timestamp(tt.min())
+        l = pd.Timestamp(tt.max())
+        per[c] = (f, l)
+        firsts.append(f)
+        lasts.append(l)
+
+    if not firsts or not lasts:
+        return ActiveWindow(None, None, per)
+
+    start = max(firsts)
+    end = min(lasts)
+
+    if start >= end:
+        return ActiveWindow(None, None, per)
+
+    return ActiveWindow(start, end, per)
+
+
+
+
 
 def wind_dirspeed_to_uv(wdir_deg: np.ndarray, wspd: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -229,6 +301,14 @@ def plot_single_ts(
         y = clip_series_quantile(y, 0.01, 0.99)
     if col in ("DO2_c", "oxy_comp_mgL_c"):
         y = clip_series_quantile(y, 0.01, 0.99)
+    if col in ("bbp_470_m1", "bbp_532_m1"):
+        y = clip_series_quantile(y, 0.01, 0.975)
+    if col in ("salinity_psu"):
+        y = clip_series_quantile(y, 0.01, 0.99)
+    if col in ("temp_ctd_c"):
+        y = clip_series_quantile(y, 0.01, 0.99)
+    if col in ("chl"):
+        y = clip_series_quantile(y, 0.01, 0.99)
 
     # keep original (after clipping but before smoothing)
     y_raw = y.copy()
@@ -262,7 +342,7 @@ def plot_single_ts(
     line_main, = ax.plot(
         t,
         y,
-        linewidth=1.3,
+        linewidth=2,
         color=main_color,
         label="Signal",
     )
@@ -294,45 +374,55 @@ def plot_single_ts(
         legend_labels.append("Hourly anomaly")
 
     # --- Legend (single, clean) ---
-    ax.legend(
-        legend_handles,
-        legend_labels,
-        loc="upper left",
-        fontsize=fontSize,
-        frameon=True,
-        framealpha=0.85,
-    )
+    if anomaly.enabled:
+        ax.legend(
+            legend_handles,
+            legend_labels,
+            loc="upper left",
+            fontsize=fontSize,
+            frameon=True,
+            framealpha=0.85,
+        )
 
     # ------------------------------------------------------------------
-    # Vertical marker lines (every 15 days)
+    # Vertical marker lines (from map markers: --mark-every-days)
+    # Keep x ticks as-is (every 15 days), but DO NOT let markers expand xlim.
     # ------------------------------------------------------------------
     if t.notna().any():
         tmin = pd.to_datetime(t.min())
         tmax = pd.to_datetime(t.max())
 
-        # primo marker allineato al giorno intero
-        start = tmin.normalize()
+        # 1) draw vertical lines using markers (same frequency as map)
+        if markers is not None and not markers.empty:
+            mk = markers.copy()
+            mk["time_utc"] = pd.to_datetime(mk["time_utc"], errors="coerce")
+            mk = mk.dropna(subset=["time_utc"])
 
-        marker_times = pd.date_range(start=start, end=tmax, freq="15D")
+            # IMPORTANT: keep only markers inside the (already cut) TS range
+            mk = mk[(mk["time_utc"] >= tmin) & (mk["time_utc"] <= tmax)]
 
-        for i, mt in enumerate(marker_times, start=1):
-            ax.axvline(mt, linewidth=0.9, alpha=0.25)
+            for r in mk.itertuples(index=False):
+                ax.axvline(r.time_utc, linewidth=0.9, alpha=0.25)
+                ax.annotate(
+                    str(r.marker_id),
+                    xy=(r.time_utc, 1.0),
+                    xycoords=("data", "axes fraction"),
+                    xytext=(2, -2),
+                    textcoords="offset points",
+                    fontsize=fontSize,
+                    ha="left",
+                    va="top",
+                    alpha=0.75,
+                )
 
-            ax.annotate(
-                str(i),
-                xy=(mt, 1.0),
-                xycoords=("data", "axes fraction"),
-                xytext=(2, -2),
-                textcoords="offset points",
-                fontsize=fontSize,
-                ha="left",
-                va="top",
-                alpha=0.75,
-            )
-
-        # Allinea anche le xticks ogni 15 giorni
+        # 2) keep your x ticks every 15 days (anti-overlap), no rotation
         ax.xaxis.set_major_locator(mdates.DayLocator(interval=15))
         ax.xaxis.set_minor_locator(mdates.DayLocator(interval=1))
+
+        # 3) lock x-limits so markers can’t extend the plot range
+        ax.set_xlim(tmin, tmax)
+        if ax2 is not None:
+            ax2.set_xlim(tmin, tmax)
 
     ax.set_title(title)
     ax.set_xlabel("Time (UTC)")
@@ -385,6 +475,60 @@ def plot_time_series_singles(
     do2_mgl_col = "oxy_comp_mgL_c" if "oxy_comp_mgL_c" in df.columns else None
     bbp470_col = "bbp_470_m1" if "bbp_470_m1" in df.columns else None
     bbp532_col = "bbp_532_m1" if "bbp_532_m1" in df.columns else None
+    temp_ctd_col = "temp_ctd_c" if "temp_ctd_c" in df.columns else None
+    chl_col      = "chl"        if "chl" in df.columns else None
+    # -------------------------------------------------------------
+    # Restrict TS to the common active window across ALL plotted vars
+    # -------------------------------------------------------------
+    plotted_cols = [
+        c for c in [
+            sst_col,
+            sal_col,
+            wspd_col,
+            vort_col,
+            strain_col,
+            rot_col,
+            curv_col,
+            curv_s_col,
+            ow_col,
+            do2_raw_col,  # (se lo riattivi)
+            do2_mgl_col,
+            bbp470_col,
+            bbp532_col,
+            temp_ctd_col,
+            chl_col,
+        ]
+        if c is not None
+    ]
+
+    aw = compute_common_active_window(df, plotted_cols, time_col="time_utc", min_valid=10)
+
+    if aw.start is not None and aw.end is not None:
+        # salva un piccolo report utile
+        lines = []
+        lines.append(f"common_active_window: {aw.start}  ->  {aw.end}")
+        lines.append("")
+        lines.append("per-variable valid range:")
+        for c in plotted_cols:
+            f, l = aw.per_col.get(c, (None, None))
+            if f is None or l is None:
+                lines.append(f"  - {c}: insufficient data")
+            else:
+                lines.append(f"  - {c}: {f}  ->  {l}")
+
+        (outdir / "active_window_ts.txt").write_text("\n".join(lines), encoding="utf-8")
+
+        # cut df for TS only
+        tt = pd.to_datetime(df["time_utc"], errors="coerce")
+        df = df[(tt >= aw.start) & (tt <= aw.end)].copy()
+
+    else:
+        (outdir / "active_window_ts.txt").write_text(
+            "No common overlap window found across all plotted TS variables.\n"
+            "Kept full time range.\n",
+            encoding="utf-8",
+        )
+
 
     if sst_col:
         plot_single_ts(
@@ -457,7 +601,7 @@ def plot_time_series_singles(
             ylabel="Rotation index (-)",
             smooth_window=rot_window,
             markers=markers,  # NEW
-            anomaly=anomaly,
+            # anomaly=anomaly,
         )
 
     if curv_col:
@@ -544,6 +688,30 @@ def plot_time_series_singles(
             markers=markers,
             anomaly=anomaly,
             logy=False,
+        )
+    if temp_ctd_col:
+        plot_single_ts(
+            df,
+            outdir / "ts_temp_ctd.png",
+            title=f"{title_prefix}CTD Temperature" + (f" (smooth {smooth_all})" if smooth_all else ""),
+            col=temp_ctd_col,
+            ylabel="Temperature (°C)",
+            smooth_window=smooth_all,
+            markers=markers,
+            anomaly=anomaly,
+        )
+
+    if chl_col:
+        plot_single_ts(
+            df,
+            outdir / "ts_chl.png",
+            title=f"{title_prefix}Chlorophyll" + (f" (smooth {smooth_all})" if smooth_all else ""),
+            col=chl_col,
+            ylabel=r"Chl ($mg$ $m^{-3}$)",
+            smooth_window=smooth_all,
+            markers=markers,
+            anomaly=anomaly,
+            logy=False,  # se vuoi log, vedi nota sotto
         )
 # ----------------------------
 # Plot 1: Cartopy trajectory map (PlateCarree) + vorticity colors + wind arrows
@@ -798,6 +966,8 @@ def write_quick_report(df: pd.DataFrame, outdir: Path) -> None:
         "oxy_comp_mgL_c",
         "bbp_470_m1",
         "bbp_532_m1",
+        "temp_ctd_c",
+        "chl",
     ]
     avail = {c: int(df[c].notna().sum()) for c in cols if c in df.columns}
 
@@ -905,31 +1075,27 @@ python src/bgcd/plot_master.py `
    --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots/300534065378180" `
    --no-zero-sst `
    --decimate-quiver 7 `
-   --smooth-all 12h `
    --rot-smooth 24h `
    --mark-every-days 7 `
    --with-hourly-anomaly `
-   --anom-min-samples-per-hour 3
+   --anom-min-samples-per-hour 8
 python src/bgcd/plot_master.py `
    --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_master/master_300534065470010.csv" `
    --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots/300534065470010" `
    --no-zero-sst `
-   --decimate-quiver 7 `
-   --smooth-all 12h `
-   --rot-smooth 24h `
+   --decimate-quiver 7 `   --rot-smooth 24h `
    --mark-every-days 7 `
    --with-hourly-anomaly `
-   --anom-min-samples-per-hour 3
+   --anom-min-samples-per-hour 8
 python src/bgcd/plot_master.py `
    --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_master/master_300534065379230.csv" `
    --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots/300534065379230" `
    --no-zero-sst `
    --decimate-quiver 7 `
-   --smooth-all 12h `
    --rot-smooth 24h `
    --mark-every-days 7 `
    --with-hourly-anomaly `
-   --anom-min-samples-per-hour 3
+   --anom-min-samples-per-hour 8
 
    
 

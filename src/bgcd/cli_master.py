@@ -43,8 +43,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     p.add_argument("--bbp-db-dir", default=None, help="Directory containing bbp_<pid>.csv|parquet")
     p.add_argument("--bbp-tolerance", default="30min", help="merge_asof tolerance for bbp onto base timeline.")
-    p.add_argument("--bbp-cols", nargs="+", default=["bbp_470_m1", "bbp_532_m1"], help="BBP columns to merge into master.")
-
+    p.add_argument("--bbp-cols", nargs="+", default=["bbp_470_m1", "bbp_532_m1", "temp_ctd_c", "chl"], help="BBP columns to merge into master (can include temp_ctd_c and chl if present).")
 
     return p.parse_args(argv)
 
@@ -248,7 +247,7 @@ python -m bgcd.cli_master `
   --oxygen-cols DO2_c oxy_comp_mgL_c `
   --oxygen-tolerance 30min `
   --bbp-db-dir     "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_bbp" `
-  --bbp-cols bbp_470_m1 bbp_532_m1 `
+  --bbp-cols bbp_470_m1 bbp_532_m1 temp_ctd_c chl `
   --bbp-tolerance 30min `
   --output-dir     "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_master" `
   --format csv `
