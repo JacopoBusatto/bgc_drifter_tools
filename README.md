@@ -194,9 +194,7 @@ Automatically computed during `cli_prepare_drifter`:
 
 ### Rotation Index
 
-\[
-RI = \sin(\theta)
-\]
+$ RI = \frac{\vec{v} \times \vec{a}}{|\vec{v}| |\vec{a}|} \cdot \hat{k} = \sin(\theta) $
 
 Where θ is the angle between velocity and acceleration.
 
