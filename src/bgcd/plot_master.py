@@ -449,6 +449,79 @@ def plot_single_ts(
     fig.savefig(outpath, dpi=200)
     plt.close(fig)
 
+def plot_diurnal_cycle(
+    df: pd.DataFrame,
+    outpath: Path,
+    *,
+    title: str,
+    col: str,
+    ylabel: str,
+    time_col: str = "time_utc",
+    min_samples_per_hour: int = 3,
+    show_std_band: bool = True,
+) -> None:
+    """
+    Plot the diurnal cycle (hour-of-day climatology) for one variable.
+    Shows mean per hour and (optionally) ±1 std band. Also shows sample counts per hour.
+    """
+    if col not in df.columns or time_col not in df.columns:
+        return
+
+    t = pd.to_datetime(df[time_col], errors="coerce")
+    y = df[col]
+
+    ok = t.notna() & y.notna()
+    if not ok.any():
+        return
+
+    hour = t[ok].dt.hour
+    y_ok = y[ok]
+
+    g = y_ok.groupby(hour)
+    mean = g.mean().reindex(range(24))
+    std = g.std().reindex(range(24))
+    n = g.count().reindex(range(24)).fillna(0).astype(int)
+
+    # invalidate hours with too few samples
+    mean[n < int(min_samples_per_hour)] = np.nan
+    std[n < int(min_samples_per_hour)] = np.nan
+
+    if mean.notna().sum() < 2:
+        return
+
+    fig = plt.figure(figsize=(8.5, 4.8))
+    ax = plt.gca()
+    ax.grid(True, which="both", alpha=0.35)
+
+    x = np.arange(24)
+
+    line, = ax.plot(x, mean.to_numpy(), linewidth=2, marker="o", label="Mean")
+
+    if show_std_band and std.notna().any():
+        m = mean.to_numpy()
+        s = std.to_numpy()
+        ax.fill_between(x, m - s, m + s, alpha=0.20, label="±1σ")
+
+    ax.set_title(title)
+    ax.set_xlabel("Hour of day (UTC)")
+    ax.set_ylabel(ylabel)
+    ax.set_xlim(-0.5, 23.5)
+    ax.set_xticks(np.arange(0, 24, 3))
+
+    # counts on the right axis
+    ax2 = ax.twinx()
+    ax2.bar(x, n.to_numpy(), alpha=0.15, width=0.85, label="N samples")
+    ax2.set_ylabel("N samples")
+
+    # single legend (merge handles)
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, loc="upper left", fontsize=fontSize, frameon=True, framealpha=0.85)
+
+    plt.tight_layout()
+    fig.savefig(outpath, dpi=200)
+    plt.close(fig)
+
 
 def plot_time_series_singles(
     df: pd.DataFrame,
@@ -1007,6 +1080,8 @@ def main() -> int:
     ap.add_argument("--mark-every-days", type=int, default=7)
     ap.add_argument("--with-hourly-anomaly", action="store_true", help="Add hour-of-day anomaly on a right Y axis (y - mean(y|hour)).")
     ap.add_argument("--anom-min-samples-per-hour", type=int, default=3, help="Minimum samples per hour-of-day to compute the hour mean (otherwise anomaly is NaN for that hour).")
+    ap.add_argument("--with-diurnal-cycles", action="store_true", help="Write diurnal cycle plots (hour-of-day climatology) for key variables.")
+
     args = ap.parse_args()
 
     outdir = Path(args.outdir)

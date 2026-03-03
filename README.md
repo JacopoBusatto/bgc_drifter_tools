@@ -1,31 +1,34 @@
-# BGC Drifter Tools
+# BGC Drifter Tools (`bgcd`)
 
-**BGC Drifter Tools** is a Python package to preprocess, organize, and merge biogeochemical surface drifter data (BGC-SVP and similar platforms).
+**BGC Drifter Tools** is a Python package for preprocessing, organizing, and merging biogeochemical surface drifter data (BGC-SVP and similar platforms) into reproducible per-platform MASTER datasets.
 
-It supports:
+The package is designed for real-world operational datasets, including:
 
-- Drifter observational data (CSV)
-- Wind statistics (CSV)
-- Eulerian diagnostics sampled along trajectories (MATLAB `.mat`: vorticity, strain rate, velocity)
-- Modular merging into per-platform MASTER datasets
+- CSV files with repeated headers  
+- Mixed schemas across platforms  
+- Malformed separators and junk tokens  
+- Platform-dependent variable availability  
+- MATLAB `.mat` exports (v5, v7, v7.3)  
 
-The package is designed for **real-world operational datasets**, including:
-
-- CSV files with repeated headers
-- Mixed schemas across platforms
-- Malformed separators and junk tokens
-- Platform-dependent variable availability
+It supports physical, biogeochemical, and Eulerian diagnostics sampled along Lagrangian trajectories.
 
 ---
 
-# Key Features
+# Overview
 
-- Robust multi-header CSV parsing
-- Automatic split into per-platform raw chunks
-- Canonical normalization to a stable schema
-- Native MATLAB `.mat` support (no MATLAB required)
-- Fully CLI-based workflow
-- Modular and extensible architecture
+Typical workflow:
+
+1. **Split raw multi-header CSV files**
+2. **Canonical normalization** (stable schema, UTC timestamps)
+3. **Compute Lagrangian kinematics** (velocity, acceleration, curvature, rotation index)
+4. **Ingest MATLAB `.mat` diagnostics** (u, v, vorticity, strain, Okubo–Weiss)
+5. **Ingest optional sensors**
+   - Oxygen (`.mat`)
+   - BBP / CTD / Chlorophyll (`.csv`)
+6. **Nearest-time merge into per-platform MASTER datasets**
+7. **Optional diagnostic plotting**
+
+The entire workflow is CLI-based and fully reproducible.
 
 ---
 
@@ -33,28 +36,50 @@ The package is designed for **real-world operational datasets**, including:
 
 ```
 bgc_drifter_tools/
-│
 ├── src/bgcd/
-│   ├── io.py                  # Canonicalization and merge utilities
-│   ├── raw_split.py           # Multi-header CSV splitter
-│   ├── master.py              # Master dataset builder
+│   ├── raw_split.py
+│   ├── io.py
+│   ├── mat_io.py
+│   ├── bbp_io.py
+│   ├── master.py
 │   ├── cli_prepare_drifter.py
 │   ├── cli_prepare_wind.py
 │   ├── cli_matdb.py
-│   └── cli_master.py
-│
+│   ├── cli_oxygen.py
+│   ├── cli_prepare_bbp.py
+│   ├── cli_master.py
+│   ├── plot_master.py
+│   └── plot_med_map.py
 ├── README.md
+├── USAGE_MANUAL.md
 ├── pyproject.toml
-└── .gitignore
+└── LICENSE (MIT)
 ```
 
-All operational steps are performed via CLI modules under `bgcd.cli_*`.
+The installed Python package name is:
+
+```
+bgcd
+```
+
+All commands are executed via:
+
+```
+python -m bgcd.cli_*
+```
 
 ---
 
 # Installation
 
-## 1. Create virtual environment
+Clone the repository:
+
+```bash
+git clone https://github.com/JacopoBusatto/bgc_drifter_tools.git
+cd bgc_drifter_tools
+```
+
+Create a virtual environment.
 
 ### Windows (PowerShell)
 
@@ -73,426 +98,193 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-If you want Parquet support:
-
-```bash
-pip install pyarrow
-```
-
-## Optional visualization dependencies (plots)
-
-To generate maps (Cartopy), improved time series styling, and wind-rose diagrams, install the **viz** extra:
+Optional visualization dependencies:
 
 ```bash
 pip install -e ".[viz]"
 ```
 
 This installs:
-- cartopy (maps with coastlines/land/ocean)
-- seaborn (optional styling helpers)
-- windrose (wind rose plots)
 
-If you only need the core preprocessing/merge CLI, you can skip this extra.
+- cartopy  
+- seaborn  
+- windrose  
 
-### Notes on Cartopy installation
+If Cartopy installation fails, install via conda-forge:
 
-On some systems, Cartopy may require native libraries (PROJ/GEOS).
-If pip installation fails, the most reliable option is installing via conda-forge:
-
+```
 mamba install -c conda-forge cartopy proj geos pyproj
-
-(Then you can still run `pip install -e .` in the repository.)
-
----
-
-# Full Operational Workflow
-
-You need:
-
-```
-drifter_data.csv
-wind_data.csv
-timeseries/
-    a<platform_id>_vort.mat
 ```
 
 ---
 
-# 1️⃣ Prepare Drifter Database
+# MASTER Dataset Construction
 
-```bash
-python -m bgcd.cli_prepare_drifter \
-  --input-file "PATH/drifter_data.csv" \
-  --output-dir "PATH/db_drifter" \
-  --format csv
-```
+The MASTER builder performs a **nearest-time merge** using `pandas.merge_asof` with explicit tolerances.
 
-Output:
-
-```
-db_drifter/
-    drifter_<platform_id>.csv
-```
-
----
-
-# 2️⃣ Prepare Wind Database
-
-```bash
-python -m bgcd.cli_prepare_wind \
-  --input-file "PATH/wind_data.csv" \
-  --output-dir "PATH/db_wind" \
-  --format csv
-```
-
-Output:
-
-```
-db_wind/
-    wind_<platform_id>.csv
-```
-
----
-
-# 3️⃣ Prepare MAT (Eulerian) Database
-
-```bash
-python -m bgcd.cli_matdb \
-  --input-dir "PATH/timeseries" \
-  --output-dir "PATH/db_mat" \
-  --format csv \
-  --mode per-platform
-```
-
-Output:
-
-```
-db_mat/
-    mat_timeseries_<platform_id>.csv
-```
-
-Extracted variables:
-
-- platform_id
-- time_utc
-- lat, lon
-- u, v
-- vorticity
-- strain
-
----
-
-# 4️⃣ Build MASTER Dataset
-
-## Single platform
-
-```bash
-python -m bgcd.cli_master \
-  --platform-id 300534065378180 \
-  --drifter-db-dir "PATH/db_drifter" \
-  --wind-db-dir "PATH/db_wind" \
-  --mat-db-dir "PATH/db_mat" \
-  --output-dir "PATH/db_master"
-```
-
-## Multiple platforms
-
-```bash
-python -m bgcd.cli_master \
-  --platform-id 300534065378180 \
-  --platform-id 300534065379230 \
-  --drifter-db-dir "PATH/db_drifter" \
-  --wind-db-dir "PATH/db_wind" \
-  --mat-db-dir "PATH/db_mat" \
-  --output-dir "PATH/db_master"
-```
-
----
-
-# MASTER Temporal Strategy
-
-Default:
-
-```
---target-time drifter
-```
-
-- Drifter defines timeline
-- Wind and MAT attached via nearest-time merge
-- No interpolation
-- Missing values preserved
-
-Alternative:
-
-```
---target-time hourly
-```
-
-Creates a regular hourly grid.
-
----
-
-# Merge Tolerances
-
-Default:
+Default tolerances:
 
 ```
 --wind-tolerance 30min
 --mat-tolerance 30min
 ```
 
-If no match within tolerance → values remain `NaN`.
+No interpolation is performed.  
+If no match exists within tolerance, values remain `NaN`.
 
-This is expected behavior.
+Two timeline modes are supported:
+
+- `--target-time drifter` (default)
+- `--target-time hourly`
+
+Optional diagnostic columns:
+
+```
+--with-dt
+```
+
+This adds:
+
+- `time_utc_<source>`
+- `dt_<source>_min`
 
 ---
 
-# Output Modes
+# Spatial and Temporal Filtering
 
-Per-platform (default):
+Optional deployment cleaning tools:
 
-```
---mode per-platform
-```
+### Geographic Filter (Mediterranean bounding box)
 
-Creates:
+Enabled by default to remove pre-deployment or out-of-domain positions.
 
-```
-master_<platform_id>.csv
-```
-
-Single merged file:
+Disable with:
 
 ```
---mode single
-```
-
-Creates:
-
-```
-master_all.csv
-```
-
----
-
-## Spatial and Temporal Filtering (Deployment Cleaning)
-
-Operational drifters may include:
-
-- Pre-deployment test positions (e.g. US harbor locations)
-- Large unrealistic jumps
-- Multi-segment trajectories separated by long gaps
-
-To ensure Mediterranean-only analysis, the MASTER builder supports two optional filters.
-
----
-
-### 1️⃣ Geographic Filter (Bounding Box)
-
-By default, the MASTER CLI keeps only observations inside a predefined Mediterranean bounding box:
-
-```
-lon ∈ [-6°, 36°]
-lat ∈ [30°, 46°]
-```
-
-This automatically removes:
-
-- Pre-shipment US locations
-- Erroneous transoceanic jumps
-- Positions outside the study domain
-
-To disable this filter (debug only):
-
-```bash
 --no-bbox-filter
 ```
 
 ---
 
-### 2️⃣ Largest Continuous Temporal Segment
+### Largest Continuous Temporal Segment
 
-Some trajectories may contain multiple disconnected time blocks.
-
-Example:
-- July (harbor tests)
-- September–November (real Mediterranean deployment)
-
-To keep only the physically meaningful deployment segment:
-
-```bash
---segment-filter
 ```
-
-You may control the maximum allowed temporal gap:
-
-```bash
+--segment-filter
 --segment-max-gap 7D
 ```
 
-Meaning:
-- If a gap > 7 days exists,
-- A new segment starts,
-- Only the longest continuous segment is retained.
-
-Default:
-- Segment filter OFF
-- Gap threshold = 7 days
-
----
-
-### Why this is important
-
-This avoids:
-
-- Mixing pre-deployment and operational data
-- Unrealistic velocity/acceleration artifacts
-- Bias in rotation index or Lagrangian diagnostics
+If a temporal gap larger than the threshold is detected, a new segment starts.
+Only the longest continuous segment is retained.
 
 Filtering is applied **before merging wind and Eulerian fields**.
 
 ---
 
-
 # Canonical Data Model
 
-### Drifter (extended canonical – with Lagrangian kinematics)
+## Lagrangian Kinematics (Drifter)
 
-In addition to core observational variables, the drifter database now includes
-derived Lagrangian kinematic quantities computed directly from the trajectory:
+Automatically computed during `cli_prepare_drifter`:
 
-#### Lagrangian velocity components
-- `u_lag_ms`  → zonal Lagrangian velocity (m/s)
-- `v_lag_ms`  → meridional Lagrangian velocity (m/s)
-
-#### Lagrangian acceleration components
-- `ax_lag_ms2` → zonal acceleration (m/s²)
-- `ay_lag_ms2` → meridional acceleration (m/s²)
-
-#### Rotation Index
+- `u_lag_ms`, `v_lag_ms` (m/s)
+- `ax_lag_ms2`, `ay_lag_ms2` (m/s²)
 - `rotation_index`
+- `curvature_m1`
+- `curvature_signed_m1`
 
-The rotation index is defined as:
-
-\[
-RI = \hat{v} \times \hat{a}
-\]
-
-where:
-
-- \( \hat{v} \) is the unit Lagrangian velocity vector
-- \( \hat{a} \) is the unit Lagrangian acceleration vector
-
-In 2D this reduces to:
+### Rotation Index
 
 \[
 RI = \sin(\theta)
 \]
 
-where \( \theta \) is the angle between velocity and acceleration.
+Where θ is the angle between velocity and acceleration.
 
 Interpretation:
-- RI ≈ 0 → motion approximately straight
-- RI > 0 → counterclockwise rotation tendency
-- RI < 0 → clockwise rotation tendency
-- |RI| ≈ 1 → strong curvature
 
-These quantities are automatically computed during `cli_prepare_drifter`.
+- RI ≈ 0 → approximately straight motion  
+- RI > 0 → counterclockwise rotational tendency  
+- RI < 0 → clockwise rotational tendency  
+- |RI| ≈ 1 → strong curvature  
 
-## Wind (canonical)
+---
 
-Required:
-- platform_id
-- time_utc
+## Eulerian Diagnostics (MAT)
 
-Optional:
-- wspd*
-- wdir*
-- samples
+Extracted from `.mat` files:
 
-## MAT timeseries
+- `u`
+- `v`
+- `vorticity`
+- `strain`
+- `okubo_weiss = strain² − vorticity²`
 
-- platform_id
-- time_utc
-- lat
-- lon
-- u
-- v
-- vorticity
-- strain
+MAT v5/v7 are supported via `scipy.io.loadmat`,  
+MAT v7.3 via `h5py`.
+
+---
+
+# Diagnostic Plotting (Optional)
+
+### `plot_master.py`
+
+Generates per-platform diagnostics:
+
+- Time series plots
+- Optional hourly anomaly overlays
+- Optional diurnal cycles
+- Cartopy trajectory maps
+- Wind rose (if `windrose` installed)
+- Data availability summaries
+
+### `plot_med_map.py`
+
+Generates Mediterranean multi-drifter trajectory maps.
+
+See `USAGE_MANUAL.md` for detailed command examples.
 
 ---
 
 # Design Philosophy
 
-- Raw data are split before normalization
-- Canonical per-platform databases ensure modularity
-- No implicit interpolation
-- Merge tolerances are explicit
-- Missing values remain visible
-- Fully reproducible pipeline
-
----
-
-# Extensibility
-
-New biological datasets (e.g. oxygen, chlorophyll) should:
-
-1. Be converted into canonical per-platform files:
-   ```
-   oxygen_<platform_id>.csv
-   ```
-2. Follow same schema rules:
-   - platform_id
-   - time_utc
-3. Be merged via `cli_master`
-
-The architecture is designed for future sensor expansion.
+- Raw data are split before normalization  
+- Canonical per-platform databases ensure modularity  
+- Merge tolerances are explicit  
+- No hidden interpolation  
+- Missing values remain visible  
+- Fully reproducible CLI workflow  
+- Modular architecture for future sensor expansion  
 
 ---
 
 # License
 
-To be defined.
+This project is licensed under the **MIT License**.  
+See the `LICENSE` file for details.
 
 ---
 
 # Contributors
 
-## Software Development and Design
+## Software Design & Development
 
-- **Jacopo Busatto**  
-  CNR – Institute of Marine Sciences (ISMAR), Rome, Italy  
-  Concept, architecture, implementation, and maintenance of the BGC Drifter Tools package.
+**Jacopo Busatto**  
+CNR – Institute of Marine Sciences (ISMAR), Rome, Italy  
 
----
+## Data Production & Field Operations
 
-## Data Production and Field Operations
-
-- **Marco Bellacicco**  
-  CNR – Institute of Marine Sciences (ISMAR), Rome, Italy  
-
-- **Jacopo Busatto**  
-  CNR – Institute of Marine Sciences (ISMAR), Rome, Italy  
-
-- **Zoi Kokkinis**  
-  CNR – Institute of Marine Sciences (ISMAR), Lerici, Italy  
-
-- **Milena Menna**  
-  OGS – National Institute of Oceanography and Applied Geophysics, Trieste, Italy  
-
-Field deployment, sensor integration, and operational data production for BGC-SVP platforms.
+Marco Bellacicco (CNR-ISMAR)  
+Zoi Kokkinis (CNR-ISMAR)  
+Milena Menna (OGS)  
 
 ---
-
-Contributions, issue reports, and scientific collaborations are welcome.
 
 # Contact
 
-For questions, collaborations, or technical support regarding this repository:
+For scientific collaborations or technical questions:
 
 **Jacopo Busatto**  
 CNR – Institute of Marine Sciences (ISMAR), Rome, Italy  
 📧 jacopobusatto@cnr.it  
 
-Please open a GitHub Issue for bug reports or feature requests whenever possible.
+Please open a GitHub Issue for bug reports or feature requests.

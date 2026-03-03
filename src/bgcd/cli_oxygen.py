@@ -53,18 +53,8 @@ def main() -> None:
     ap.add_argument("--input-dir", required=True, help="Directory containing oxigen_*.mat files")
     ap.add_argument("--output-dir", required=True, help="Directory to write oxygen_<pid>.csv|parquet")
     ap.add_argument("--format", choices=["csv", "parquet"], default="csv")
-    ap.add_argument(
-        "--keep-cols",
-        nargs="+",
-        default=DEFAULT_KEEP_COLS,
-        help="Columns to extract from MAT (keys as in .mat).",
-    )
-    ap.add_argument(
-        "--zero-is-nan-cols",
-        nargs="+",
-        default=["DO2_c", "oxy_comp_mgL_c"],
-        help="Convert 0 -> NaN for these columns (if present).",
-    )
+    ap.add_argument("--keep-cols", nargs="+", default=DEFAULT_KEEP_COLS, help="Columns to extract from MAT (keys as in .mat).")
+    ap.add_argument("--zero-is-nan-cols", nargs="+", default=["DO2_c", "oxy_comp_mgL_c"], help="Convert 0 -> NaN for these columns (if present).")
     args = ap.parse_args()
 
     in_dir = Path(args.input_dir)
