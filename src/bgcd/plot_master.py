@@ -459,10 +459,17 @@ def plot_diurnal_cycle(
     time_col: str = "time_utc",
     min_samples_per_hour: int = 3,
     show_std_band: bool = True,
+    bin_hours: int = 1,  # 1=hourly, 3=3-hour bins, etc (must divide 24)
 ) -> None:
     """
     Plot the diurnal cycle (hour-of-day climatology) for one variable.
-    Shows mean per hour and (optionally) ±1 std band. Also shows sample counts per hour.
+
+    Behavior:
+    - Computes per-hour (0..23) coverage first.
+    - If min_samples_per_hour > 1, it filters out *hours* with insufficient samples BEFORE any binning.
+      This avoids artifacts from mixing poorly-sampled hours.
+    - Then aggregates either hourly (bin_hours=1) or in bins of size bin_hours (e.g., 3 -> 0,3,6,...,21).
+    - Shows mean and (optionally) ±1σ band, plus sample counts on secondary axis.
     """
     if col not in df.columns or time_col not in df.columns:
         return
@@ -477,25 +484,70 @@ def plot_diurnal_cycle(
     hour = t[ok].dt.hour
     y_ok = y[ok]
 
-    g = y_ok.groupby(hour)
-    mean = g.mean().reindex(range(24))
-    std = g.std().reindex(range(24))
-    n = g.count().reindex(range(24)).fillna(0).astype(int)
+    # ------------------------------------------------------------
+    # Pre-check / pre-filter on the 24 hourly bins (0..23)
+    # ------------------------------------------------------------
+    min_n = int(min_samples_per_hour)
+    n_per_hour = y_ok.groupby(hour).count().reindex(range(24)).fillna(0).astype(int)
 
-    # invalidate hours with too few samples
-    mean[n < int(min_samples_per_hour)] = np.nan
-    std[n < int(min_samples_per_hour)] = np.nan
+    if min_n > 1:
+        valid_hours = n_per_hour.index[n_per_hour >= min_n]
+        keep = hour.isin(valid_hours)
+
+        hour = hour[keep]
+        y_ok = y_ok[keep]
+
+        if len(y_ok) == 0:
+            return
+
+    # ------------------------------------------------------------
+    # Define aggregation key (hourly or binned)
+    # ------------------------------------------------------------
+    bh = int(bin_hours)
+
+    if bh <= 1:
+        key = hour
+        bins = np.arange(24)  # 0..23
+        x = bins
+        xticks = np.arange(0, 24, 3)
+        xlabel = "Hour of day (UTC)"
+        bar_width = 0.85
+    else:
+        if 24 % bh != 0:
+            raise ValueError("bin_hours must divide 24 (e.g., 2, 3, 4, 6, 8, 12).")
+
+        key = (hour // bh) * bh
+        bins = np.arange(0, 24, bh)  # 0,3,6,...,21 if bh=3
+        x = bins
+        xticks = bins
+        xlabel = f"Hour of day (UTC), binned every {bh}h"
+        bar_width = 0.85 * bh
+
+    # ------------------------------------------------------------
+    # Aggregate
+    # ------------------------------------------------------------
+    g = y_ok.groupby(key)
+    mean = g.mean().reindex(bins)
+    std = g.std().reindex(bins)
+    n = g.count().reindex(bins).fillna(0).astype(int)
+
+    # Optional: enforce minimum samples at the *final bin* level too.
+    # This is useful when bin_hours > 1 and you still want to hide weak bins.
+    # If you prefer ONLY the pre-filter, comment these two lines out.
+    mean[n < min_n] = np.nan
+    std[n < min_n] = np.nan
 
     if mean.notna().sum() < 2:
         return
 
-    fig = plt.figure(figsize=(8.5, 4.8))
+    # ------------------------------------------------------------
+    # Plot
+    # ------------------------------------------------------------
+    fig = plt.figure(figsize=(12, 8))
     ax = plt.gca()
     ax.grid(True, which="both", alpha=0.35)
 
-    x = np.arange(24)
-
-    line, = ax.plot(x, mean.to_numpy(), linewidth=2, marker="o", label="Mean")
+    ax.plot(x, mean.to_numpy(), linewidth=2, marker="o", label="Mean")
 
     if show_std_band and std.notna().any():
         m = mean.to_numpy()
@@ -503,20 +555,27 @@ def plot_diurnal_cycle(
         ax.fill_between(x, m - s, m + s, alpha=0.20, label="±1σ")
 
     ax.set_title(title)
-    ax.set_xlabel("Hour of day (UTC)")
+    ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    ax.set_xlim(-0.5, 23.5)
-    ax.set_xticks(np.arange(0, 24, 3))
+    ax.set_xlim(float(x.min()) - 0.5, float(x.max()) + 0.5)
+    ax.set_xticks(xticks)
 
     # counts on the right axis
     ax2 = ax.twinx()
-    ax2.bar(x, n.to_numpy(), alpha=0.15, width=0.85, label="N samples")
+    ax2.bar(x, n.to_numpy(), alpha=0.15, width=bar_width, label="N samples")
     ax2.set_ylabel("N samples")
 
     # single legend (merge handles)
     h1, l1 = ax.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
-    ax.legend(h1 + h2, l1 + l2, loc="upper left", fontsize=fontSize, frameon=True, framealpha=0.85)
+    ax.legend(
+        h1 + h2,
+        l1 + l2,
+        loc="upper left",
+        fontsize=fontSize,
+        frameon=True,
+        framealpha=0.85,
+    )
 
     plt.tight_layout()
     fig.savefig(outpath, dpi=200)
@@ -532,6 +591,8 @@ def plot_time_series_singles(
     rot_smooth: str | None = None,
     markers: pd.DataFrame | None = None,  # NEW
     anomaly: AnomalyOpts = AnomalyOpts(),
+    with_diurnal_cycles: bool = False,
+    bin_hours: int = 1,   # NEW: 1=hourly, 3=3-hour bins
 ) -> None:
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -614,6 +675,17 @@ def plot_time_series_singles(
             markers=markers,  # NEW
             anomaly=anomaly,
         )
+        if with_diurnal_cycles:
+                plot_diurnal_cycle(
+                df,
+                outdir / "diurnal_sst.png",
+                title=f"{title_prefix}SST — diurnal cycle",
+                col=sst_col,
+                ylabel="SST (°C)",
+                min_samples_per_hour=anomaly.min_samples_per_hour,
+                bin_hours=bin_hours,
+            )
+
 
     if sal_col:
         plot_single_ts(
@@ -626,6 +698,16 @@ def plot_time_series_singles(
             markers=markers,  # NEW
             anomaly=anomaly,
         )
+        if with_diurnal_cycles:
+            plot_diurnal_cycle(
+                df,
+                outdir / "diurnal_salinity.png",
+                title=f"{title_prefix}Salinity — diurnal cycle",
+                col=sal_col,
+                ylabel="Salinity (PSU)",
+                min_samples_per_hour=anomaly.min_samples_per_hour,
+                bin_hours=bin_hours,
+            )
 
     if wspd_col:
         plot_single_ts(
@@ -713,17 +795,17 @@ def plot_time_series_singles(
             anomaly=anomaly,
         )
 
-    if do2_raw_col:
-        plot_single_ts(
-            df,
-            outdir / "ts_oxygen_DO2_raw.png",
-            title=f"{title_prefix}DO2 (raw counts)" + (f" (smooth {smooth_all})" if smooth_all else ""),
-            col=do2_raw_col,
-            ylabel="DO2 (counts)",
-            smooth_window=smooth_all,
-            markers=markers,
-            anomaly=anomaly,
-        )
+    # if do2_raw_col:
+    #     plot_single_ts(
+    #         df,
+    #         outdir / "ts_oxygen_DO2_raw.png",
+    #         title=f"{title_prefix}DO2 (raw counts)" + (f" (smooth {smooth_all})" if smooth_all else ""),
+    #         col=do2_raw_col,
+    #         ylabel="DO2 (counts)",
+    #         smooth_window=smooth_all,
+    #         markers=markers,
+    #         anomaly=anomaly,
+    #     )
 
     if do2_mgl_col:
         plot_single_ts(
@@ -736,6 +818,16 @@ def plot_time_series_singles(
             markers=markers,
             anomaly=anomaly,
         )
+        if with_diurnal_cycles:
+            plot_diurnal_cycle(
+                df,
+                outdir / "diurnal_o.png",
+                title=f"{title_prefix}Oxygen — diurnal cycle",
+                col=do2_mgl_col,
+                ylabel="Oxygen (mg/L)",
+                min_samples_per_hour=anomaly.min_samples_per_hour,
+                bin_hours=bin_hours,
+            )
 
     if bbp470_col:
         plot_single_ts(
@@ -749,6 +841,16 @@ def plot_time_series_singles(
             anomaly=anomaly,
             logy=False,
         )
+        if with_diurnal_cycles:
+            plot_diurnal_cycle(
+                df,
+                outdir / "diurnal_bbp470.png",
+                title=f"{title_prefix}BBP 470 nm — diurnal cycle",
+                col=bbp470_col,
+                ylabel="BBP (m$^{-1}$)",
+                min_samples_per_hour=anomaly.min_samples_per_hour,
+                bin_hours=bin_hours,
+            )
 
     if bbp532_col:
         plot_single_ts(
@@ -762,6 +864,16 @@ def plot_time_series_singles(
             anomaly=anomaly,
             logy=False,
         )
+        if with_diurnal_cycles:
+            plot_diurnal_cycle(
+                df,
+                outdir / "diurnal_bbp532.png",
+                title=f"{title_prefix}BBP 532 nm — diurnal cycle",
+                col=bbp532_col,
+                ylabel="BBP (m$^{-1}$)",
+                min_samples_per_hour=anomaly.min_samples_per_hour,
+                bin_hours=bin_hours,
+            )
     if temp_ctd_col:
         plot_single_ts(
             df,
@@ -773,6 +885,16 @@ def plot_time_series_singles(
             markers=markers,
             anomaly=anomaly,
         )
+        if with_diurnal_cycles:
+            plot_diurnal_cycle(
+                df,
+                outdir / "diurnal_temp_ctd.png",
+                title=f"{title_prefix}CTD Temperature — diurnal cycle",
+                col=temp_ctd_col,
+                ylabel="Temperature (°C)",
+                min_samples_per_hour=anomaly.min_samples_per_hour,
+                bin_hours=bin_hours,
+            )
 
     if chl_col:
         plot_single_ts(
@@ -786,6 +908,16 @@ def plot_time_series_singles(
             anomaly=anomaly,
             logy=False,  # se vuoi log, vedi nota sotto
         )
+        if with_diurnal_cycles:
+            plot_diurnal_cycle(
+                df,
+                outdir / "diurnal_chl.png",
+                title=f"{title_prefix}Chlorophyll — diurnal cycle",
+                col=chl_col,
+                ylabel=r"Chl ($mg$ $m^{-3}$)",
+                min_samples_per_hour=anomaly.min_samples_per_hour,
+                bin_hours=bin_hours,
+            )
 # ----------------------------
 # Plot 1: Cartopy trajectory map (PlateCarree) + vorticity colors + wind arrows
 # ----------------------------
@@ -1081,6 +1213,7 @@ def main() -> int:
     ap.add_argument("--with-hourly-anomaly", action="store_true", help="Add hour-of-day anomaly on a right Y axis (y - mean(y|hour)).")
     ap.add_argument("--anom-min-samples-per-hour", type=int, default=3, help="Minimum samples per hour-of-day to compute the hour mean (otherwise anomaly is NaN for that hour).")
     ap.add_argument("--with-diurnal-cycles", action="store_true", help="Write diurnal cycle plots (hour-of-day climatology) for key variables.")
+    ap.add_argument("--diurnal-binning", type=int, default=1, help="Binning for diurnal cycle (e.g. '1H' for hourly, '3H' for 3-hour bins). Default is '1H' (no binning).")
 
     args = ap.parse_args()
 
@@ -1109,7 +1242,7 @@ def main() -> int:
     )
 
     # Time series: single plots
-    plot_time_series_singles(df, outdir, title_prefix=title_prefix, smooth_all=smooth_all, rot_smooth=rot_smooth, markers=markers, anomaly=anomaly_opts)
+    plot_time_series_singles(df, outdir, title_prefix=title_prefix, smooth_all=smooth_all, rot_smooth=rot_smooth, markers=markers, anomaly=anomaly_opts, with_diurnal_cycles=bool(args.with_diurnal_cycles), bin_hours=args.diurnal_binning)
 
     # Cartopy map
     try:
@@ -1153,15 +1286,20 @@ python src/bgcd/plot_master.py `
    --rot-smooth 24h `
    --mark-every-days 7 `
    --with-hourly-anomaly `
-   --anom-min-samples-per-hour 8
+   --anom-min-samples-per-hour 20 `
+   --with-diurnal-cycles `
+   --diurnal-binning 3
 python src/bgcd/plot_master.py `
    --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_master/master_300534065470010.csv" `
    --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots/300534065470010" `
    --no-zero-sst `
-   --decimate-quiver 7 `   --rot-smooth 24h `
+   --decimate-quiver 7 `
+   --rot-smooth 24h `
    --mark-every-days 7 `
    --with-hourly-anomaly `
-   --anom-min-samples-per-hour 8
+   --anom-min-samples-per-hour 20 `
+   --with-diurnal-cycles `
+   --diurnal-binning 3
 python src/bgcd/plot_master.py `
    --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_master/master_300534065379230.csv" `
    --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots/300534065379230" `
@@ -1170,7 +1308,9 @@ python src/bgcd/plot_master.py `
    --rot-smooth 24h `
    --mark-every-days 7 `
    --with-hourly-anomaly `
-   --anom-min-samples-per-hour 8
+   --anom-min-samples-per-hour 20 `
+   --with-diurnal-cycles `
+   --diurnal-binning 3
 
    
 

@@ -520,8 +520,54 @@ python src/bgcd/plot_master.py `
    --rot-smooth 24h `
    --mark-every-days 7 `
    --with-hourly-anomaly `
-   --anom-min-samples-per-hour 8
+   --anom-min-samples-per-hour 8 `
+   --with-diurnal-cycles `
+   --diurnal-binning 3
 ```
+
+Options:
+--no-zero-sst
+action="store_true"
+Treat SST==0 as NaN (fill-value behavior)
+
+--sst-fill
+default="-5.0"
+Comma-separated SST fill values to mask (e.g. -5, -999)
+
+--decimate-quiver N
+default=10
+Keep 1 every N points for wind arrows
+
+--smooth-all
+default=""
+Time-based rolling mean window applied to ALL time series (e.g. '6H', '30min', '1D'). Empty disables.
+
+--rot-smooth N
+default=""
+Time-based rolling mean window applied only to rotation_index (overrides --smooth-all for rotation). Empty disables.
+
+--mark-every-days N
+default=7
+Mark time series and trajectories every N days
+
+--with-hourly-anomaly
+action="store_true"
+Add hour-of-day anomaly on a right Y axis (y - mean(y|hour)).
+
+--anom-min-samples-per-hour
+default=3
+Minimum samples per hour-of-day to compute the hour mean (otherwise anomaly is NaN for that hour).
+
+--with-diurnal-cycles
+action="store_true"
+Write diurnal cycle plots (hour-of-day climatology) for key variables.
+
+--diurnal-binning
+default=1
+Binning for diurnal cycle (e.g. '1H' for hourly, '3H' for 3-hour bins). Default is '1H' (no binning).
+
+
+
 
 Multi-drifter Mediterranean map:
 
