@@ -1,0 +1,163 @@
+# analysis_config_min.yml  (QC-focused, editable)
+analysis:
+  data_window:
+    required:
+      - sst_c
+      - bbp_470_m1
+      - bbp_532_m1
+      - chl
+      - wspd
+    optional:
+      - salinity_psu
+      - okubo_weiss
+      - curvature_m1
+      - rotation_index
+      - oxy_comp_mgL_c
+      - DO2_c
+      - vorticity
+      - temp_ctd_c
+    min_points: 50
+    max_gap_h: 6
+    prefer: duration
+
+  # -------------------------
+  # Variable groups (defaults)
+  # -------------------------
+  phys_vars:
+    - sst_c
+    - temp_ctd_c
+    - salinity_psu
+    - slp_mb
+    - wspd
+    - wspd_mean
+    - wdir
+    - wdir_mean
+    - vorticity
+    - strain
+    - okubo_weiss
+    - curvature_m1
+    - rotation_index
+
+  bio_vars:
+    - chl
+    - bbp_470_m1
+    - bbp_532_m1
+    - DO2_c
+    - oxy_comp_mgL_c
+
+  # -------------------------
+  # Quality Control (QC)
+  # -------------------------
+  qc:
+    # Time axis checks (no interpolation by default)
+    time:
+      expected_dt_hours: 3.0
+      dt_tolerance_hours: 0.75          # warn if median dt deviates more than this
+      gap_warn_hours: 12.0              # warn on gaps larger than this
+      allow_irregular_time: true
+      # If multiple samples fall in same time bin (optional handling)
+      # - keep: "first" | "last" | "median"
+      duplicates_strategy: "median"
+
+    # Hard physical bounds: outside => NaN + flag + warning summary
+    # Use null for open-ended bounds.
+    bounds:
+      sst_c:            {min: -2.0, max: 40.0}
+      temp_ctd_c:       {min: -2.0, max: 40.0}
+      salinity_psu:     {min: 30.0, max: 40.5}
+      slp_mb:           {min: 900.0, max: 1100.0}
+      wspd:             {min: 0.0,  max: 60.0}
+      wspd_mean:        {min: 0.0,  max: 60.0}
+      wdir:             {min: 0.0,  max: 360.0}
+      wdir_mean:        {min: 0.0,  max: 360.0}
+      chl:              {min: 0.0,  max: 50.0}
+      bbp_470_m1:       {min: 0.0,  max: null}
+      bbp_532_m1:       {min: 0.0,  max: null}
+      DO2_c:            {min: 0.0,  max: null}
+      oxy_comp_mgL_c:   {min: 0.0,  max: 25.0}
+      # Kinematic/dynamical features often have wide ranges; keep open-ended unless sure
+      vorticity:        {min: null, max: null}
+      strain:           {min: null, max: null}
+      okubo_weiss:      {min: null, max: null}
+      curvature_m1:     {min: null, max: null}
+      rotation_index:   {min: -1.0, max: 1.0}
+
+    # Spike detection based on time-derivative (flags by default)
+    # NOTE: derivative uses actual dt in seconds (irregular time supported)
+    derivative_spikes:
+      enabled: true
+      # Per-variable absolute derivative thresholds (units per second).
+      # If a variable is not listed, derivative spike check is skipped.
+      # You can start with conservative values and tighten after inspecting QC reports.
+      thresholds_abs_per_s:
+        curvature_m1: 0.0005
+        vorticity:    0.0002
+        strain:       0.0002
+      # Strategy when spikes are detected:
+      # - "mask_points": set the spiky points to NaN
+      # - "flag_only": keep values but flag them
+      action: "mask_points"
+
+    # Flatline / stuck sensor detection
+    flatline:
+      enabled: true
+      window_hours: 24.0
+      # If rolling std < eps for most points in window => likely stuck
+      eps_std:
+        salinity_psu: 0.0005
+        sst_c:        0.001
+        temp_ctd_c:   0.001
+        chl:          0.0001
+        bbp_470_m1:   0.0000001
+        DO2_c:        0.0001
+      action: "flag_only"   # usually don't mask automatically
+
+    # Overlap requirements (for pairwise / multivariate)
+    pairwise_overlap:
+      # Require at least 70% overlap for a pair, AND at least N points.
+      # (If a variable is too masked, it gets ignored + warning; promote to required if needed.)
+      min_fraction: 0.7
+      min_points: 50
+
+    # Reporting
+    report:
+      enabled: true
+      outdir_name: "qc"
+      write_flag_columns: true
+      # Create a compact summary table + per-variable stats + warnings log
+      write_summary_csv: true
+      write_variable_stats_csv: true
+      write_warnings_txt: true
+
+  # -------------------------
+  # Preprocessing defaults
+  # -------------------------
+  preprocessing:
+    standardize: zscore
+    # Default: do NOT remove diurnal (drifter is Lagrangian; compare RAW vs filtered explicitly)
+    remove_diurnal: false
+    # Optional smoothing for "slow component" (no interpolation): rolling time-based mean
+    lowpass_window_hours: 72
+    compute_derivative: false
+
+  # -------------------------
+  # Analyses toggles (v1)
+  # -------------------------
+  coupling:
+    compute_pairwise_corr: true
+    compute_rolling_corr: true
+    rolling_window_hours: 48
+    rolling_min_points: 10
+    compute_lagged_corr: true
+    max_lag_hours: 72
+    lag_match_tolerance_hours: 1.5
+    compute_mutual_information: false
+
+  multivariate:
+    run_pca: true
+    run_cca: false
+    run_pls: false
+
+  regimes:
+    run_clustering: false
+    run_changepoint: false

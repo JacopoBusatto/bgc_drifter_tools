@@ -613,3 +613,74 @@ RECOMMENDED WORKFLOW FOR NEW CAMPAIGN
 6. Build MASTER
 7. Optional: generate plots
 8. Archive db_master output
+
+## ANALYSIS
+#### Workflow
+```
+MASTER CSV (1 drifter)
+   |
+   v
+[A] QC (opzionale ma consigliato)
+   - time checks (dt/gaps)
+   - duplicates (median)
+   - bounds -> mask NaN
+   - coverage report
+   |
+   |  outputs:
+   |   OUT/<pid>/A_qc/
+   |     data/qc_clean_master.csv
+   |     reports/qc_*.csv
+   |     run_log.txt
+   v
+[B] Window selection (SEMPRE)
+   - usa analysis.data_window.required
+   - spezza su gap > max_gap_h
+   - sceglie la window di durata massima (>= min_points)
+   |
+   |  outputs:
+   |   OUT/<pid>/B_window/
+   |     best_window.txt
+   |     reports/windows_top.csv
+   |     data/master_subset_best_window.csv
+   v
+[C] Preprocess (opzionale, parallelo)
+   - NON sostituisce i raw: crea versioni alternative
+   - es: zscore, lowpass, highpass, derivative
+   |
+   |  outputs:
+   |   OUT/<pid>/C_preprocess/
+   |     data/raw.csv (o link al subset)
+   |     data/lp72h.csv
+   |     data/hp.csv (= raw - lp)
+   |     reports/preprocess_report.csv
+   v
+[D] Coupling (v1)
+   D1) Pairwise Pearson phys×bio
+       - usa qc.pairwise_overlap:
+           min_fraction = 0.7
+           min_points   = 50
+       - se una variabile è troppo NaN -> viene ignorata + warning
+       outputs:
+         OUT/<pid>/D_coupling/pairwise/
+           reports/pairwise_corr.csv
+           figures/heatmap.png
+           run_log.txt
+
+   D2) Rolling correlation (per coppie scelte o top pairs)
+       - window = 48H
+       - rolling_min_points = 10
+       outputs:
+         OUT/<pid>/D_coupling/rolling/
+           reports/rolling_corr_x__y.csv
+           figures/rolling_corr_x__y.png
+
+   D3) Lagged correlation
+       - max_lag_hours = 72
+       - lag_match_tolerance_hours = 1.5 (merge_asof/nearest)
+       outputs:
+         OUT/<pid>/D_coupling/lagged/
+           reports/lagged_corr_x__y.csv
+           figures/lagged_corr_x__y.png
+```
+
+  

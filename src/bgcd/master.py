@@ -64,7 +64,94 @@ def _ensure_keys(df: pd.DataFrame, platform_id: str) -> pd.DataFrame:
     df = df.dropna(subset=["platform_id", "time_utc"])
     return df
 
+# -----------------------------------------------------------------------------
+# QC filter helpers (remove "out of water / pre-deployment" points)
+# -----------------------------------------------------------------------------
+@dataclass(frozen=True)
+class QCParams:
+    sst_min: float = 5.0
+    sst_max: float = 35.0
+    sal_min: float = 20.0
+    sal_max: float = 45.0
+    speed_max_ms: float = 3.0  # generous upper bound for SVP in m/s
 
+def filter_drop_bad_sst_rows(
+    d: pd.DataFrame,
+    *,
+    sst_col: str = "sst_c",
+    sst_min: float = 1.0,
+    sst_max: float = 40.0,
+) -> pd.DataFrame:
+    """
+    Drop rows where SST is clearly non-physical / placeholder.
+    Keeps rows if sst_col is missing.
+
+    Rules:
+      - sst must be finite
+      - sst in [sst_min, sst_max]
+      - sst not in common placeholders (0, -5)
+    """
+    if d.empty or sst_col not in d.columns:
+        return d
+
+    sst = pd.to_numeric(d[sst_col], errors="coerce")
+    ok = sst.notna() & (sst >= sst_min) & (sst <= sst_max) & (~sst.isin([0.0, -5.0]))
+
+    return d.loc[ok].copy()
+
+def filter_trim_to_first_qc_pass(
+    d: pd.DataFrame,
+    *,
+    qc: QCParams = QCParams(),
+) -> pd.DataFrame:
+    """
+    Trim the initial part of the track until the first row that passes a basic
+    physical QC (useful to remove pre-deployment / out-of-water points).
+
+    QC rules (applied only if columns exist):
+      - lat/lon must be finite
+      - sst_c in [sst_min, sst_max] and not zero-like
+      - salinity_psu in [sal_min, sal_max] and not zero-like
+      - speed = sqrt(u_lag_ms^2 + v_lag_ms^2) <= speed_max_ms (if available)
+
+    Returns data from the first QC-passing row onward.
+    If no row passes QC -> returns empty.
+    """
+    if d.empty:
+        return d
+
+    d = d.sort_values("time_utc").copy()
+
+    ok = d["lat"].notna() & d["lon"].notna()
+
+    if "sst_c" in d.columns:
+        sst = d["sst_c"]
+        ok &= sst.notna() & (sst >= qc.sst_min) & (sst <= qc.sst_max) & (sst != 0.0)
+
+    if "salinity_psu" in d.columns:
+        sal = d["salinity_psu"]
+
+        # Treat placeholders as missing
+        sal_clean = sal.where(~sal.isin([0.0, 15.0]))
+
+        # Use salinity as QC constraint ONLY if we have at least one plausible value
+        good_sal = sal_clean.notna() & (sal_clean >= qc.sal_min) & (sal_clean <= qc.sal_max)
+
+        if good_sal.any():
+            ok &= good_sal
+        # else: ignore salinity entirely for QC (sensor not available / placeholder)
+
+    if "u_lag_ms" in d.columns and "v_lag_ms" in d.columns:
+        u = d["u_lag_ms"]
+        v = d["v_lag_ms"]
+        spd = (u.astype("float64") ** 2 + v.astype("float64") ** 2) ** 0.5
+        ok &= spd.notna() & (spd <= qc.speed_max_ms)
+
+    if not ok.any():
+        return d.iloc[0:0].copy()
+
+    t0 = d.loc[ok, "time_utc"].iloc[0]
+    return d[d["time_utc"] >= t0].reset_index(drop=True)
 # -----------------------------------------------------------------------------
 # Merge helpers
 # -----------------------------------------------------------------------------
@@ -238,11 +325,14 @@ def build_master_for_platform(
     mat_tolerance: str = "30min",
     hourly_freq: str = "1H",
     extras: list[ExtraSource] | None = None,
-    # NEW:
     apply_bbox_filter: bool = True,
     apply_segment_filter: bool = False,
     segment_max_gap: str = "7D",
     with_dt: bool = False,
+    # QC:
+    apply_qc_trim: bool = True,
+    qc: QCParams = QCParams(),
+    apply_sst_qc: bool = True,
 ) -> pd.DataFrame:
     """
     Build a per-platform master table by merging canonical per-platform DBs.
@@ -303,6 +393,14 @@ def build_master_for_platform(
 
     if apply_segment_filter:
         d = filter_largest_contiguous_segment(d, max_gap=segment_max_gap)
+
+    # --- NEW: row-wise SST QC cleanup (uses qc.sst_min/max)
+    if apply_sst_qc:
+        d = filter_drop_bad_sst_rows(d, sst_min=qc.sst_min, sst_max=qc.sst_max)
+
+    # --- optional trim (uses broader QC rules)
+    if apply_qc_trim:
+        d = filter_trim_to_first_qc_pass(d, qc=qc)
 
     # wind: keep all columns (only ensure keys)
     if "platform_id" not in w.columns or "time_utc" not in w.columns:

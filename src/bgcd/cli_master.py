@@ -6,7 +6,8 @@ import sys
 
 import pandas as pd
 
-from .master import MasterPaths, build_master_for_platform, ExtraSource
+
+from .master import MasterPaths, build_master_for_platform, ExtraSource, QCParams
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -44,6 +45,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--bbp-db-dir", default=None, help="Directory containing bbp_<pid>.csv|parquet")
     p.add_argument("--bbp-tolerance", default="30min", help="merge_asof tolerance for bbp onto base timeline.")
     p.add_argument("--bbp-cols", nargs="+", default=["bbp_470_m1", "bbp_532_m1", "temp_ctd_c", "chl"], help="BBP columns to merge into master (can include temp_ctd_c and chl if present).")
+
+    # QC trim (pre-deployment / out-of-water removal)
+    p.add_argument("--no-qc-trim", action="store_true", help="Disable trimming to first QC-passing drifter sample.")
+    p.add_argument("--no-sst-qc", action="store_true", help="Disable simple SST QC row filtering.")
+    p.add_argument("--qc-sst-min", type=float, default=5.0)
+    p.add_argument("--qc-sst-max", type=float, default=35.0)
+    p.add_argument("--qc-sal-min", type=float, default=20.0)
+    p.add_argument("--qc-sal-max", type=float, default=45.0)
+    p.add_argument("--qc-speed-max", type=float, default=10.0, help="Max allowed lagrangian speed (m/s) for QC trim.")
 
     return p.parse_args(argv)
 
@@ -137,6 +147,15 @@ def main(argv: list[str] | None = None) -> int:
                 apply_bbox_filter=not args.no_bbox_filter,
                 apply_segment_filter=args.segment_filter,
                 segment_max_gap=args.segment_max_gap,
+                apply_qc_trim=not args.no_qc_trim,
+                apply_sst_qc=not args.no_sst_qc,
+                qc=QCParams(
+                    sst_min=args.qc_sst_min,
+                    sst_max=args.qc_sst_max,
+                    sal_min=args.qc_sal_min,
+                    sal_max=args.qc_sal_max,
+                    speed_max_ms=args.qc_speed_max,
+                ),
             )
         except TypeError:
             df = build_master_for_platform(
@@ -255,7 +274,11 @@ python -m bgcd.cli_master `
   --mode per-platform `
   --with-dt `
   --segment-filter `
-  --segment-max-gap 7D
+  --segment-max-gap 7D `
+  --no-qc-trim `
+  --qc-sst-min 1.0 `
+  --qc-sst-max 40.0
+
 
 
 PER AGGIUNGERE COLONNE> --oxygen-cols DO2_c oxy_comp_mgL_c oxy_comp_saturation_c TdegC_c

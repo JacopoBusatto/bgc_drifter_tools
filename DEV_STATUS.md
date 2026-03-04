@@ -136,4 +136,29 @@ Format:
 - Added DEV_STATUS.md logbook and status snapshot
 - Next: start analysis/ module scaffold
 
+### 2026-03-04
+- Added diural cycle plots for sst, temp_ctd, chl, bbp, O2, sal
+    i.   option --anom-min-samples-per-hour N sets the number of samples per hour
+    ii.  option --with-diurnal-cycles         is a switch
+    iii. option --diurnal-binning N           sets the aggregation width
+
+#### Analysis Modules — QC Design (Completed)
+
+- Agreed QC philosophy:
+  - No interpolation by default; support irregular time and time-based rolling windows.
+  - Hard physical bounds: out-of-range values are masked (NaN), not clipped.
+  - Derivative-based spike detection for numerical features (curvature/vorticity/strain).
+  - Flatline (stuck sensor) detection with flagging.
+  - Minimum overlap thresholds for pairwise/multivariate analyses.
+  - QC outputs: summary tables + warnings log; optional per-point QC flag columns.
+
+Next implementation step:
+- `bgcd/analysis/preprocess.py`:
+  - time axis checks + duplicate handling
+  - bounds masking
+  - derivative spike masking/flagging
+  - flatline flagging
+  - QC report writer
+
+
 (append new entries above this line)

@@ -342,7 +342,7 @@ def add_lagrangian_kinematics(
 
         # time in seconds
         t = pd.to_datetime(g[time_col], errors="coerce")
-        t_s = (t.astype("int64") / 1e9).to_numpy(dtype=float)  # seconds since epoch
+        t_s = (t.to_numpy(dtype="datetime64[ns]").astype("int64").astype(float)) / 1e9
 
         lat = pd.to_numeric(g[lat_col], errors="coerce").to_numpy(dtype=float)
         lon = pd.to_numeric(g[lon_col], errors="coerce").to_numpy(dtype=float)

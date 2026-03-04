@@ -37,6 +37,7 @@ The entire workflow is CLI-based and fully reproducible.
 ```
 bgc_drifter_tools/
 ├── src/bgcd/
+│   ├── __init__.py
 │   ├── raw_split.py
 │   ├── io.py
 │   ├── mat_io.py
