@@ -9,6 +9,8 @@ from typing import List, Tuple
 import numpy as np
 import pandas as pd
 
+from scipy.stats import pearsonr
+
 
 @dataclass
 class LagCorrResult:
@@ -16,15 +18,11 @@ class LagCorrResult:
     df: pd.DataFrame  # columns: lag_hours, r, n_pairs
 
 
-def _pearson_r(x: np.ndarray, y: np.ndarray) -> float:
-    if x.size < 2:
-        return np.nan
-    x0 = x - x.mean()
-    y0 = y - y.mean()
-    den = np.sqrt((x0 * x0).sum()) * np.sqrt((y0 * y0).sum())
-    if den == 0:
-        return np.nan
-    return float((x0 * y0).sum() / den)
+@dataclass
+class LagCorrResult:
+    pair_name: str
+    df: pd.DataFrame  # columns: lag_hours, r, p_value, n_pairs
+
 
 
 def lag_correlation_asof(
@@ -84,11 +82,14 @@ def lag_correlation_asof(
 
         n = int(len(m))
         if n >= int(min_pairs):
-            r = _pearson_r(m["x"].to_numpy(dtype=float), m["y"].to_numpy(dtype=float))
+            xv = m["x"].to_numpy(dtype=float)
+            yv = m["y"].to_numpy(dtype=float)
+            r, p = pearsonr(xv, yv)
         else:
             r = np.nan
+            p = np.nan
 
-        rows.append({"lag_hours": lag_h, "r": r, "n_pairs": n})
+        rows.append({"lag_hours": lag_h, "r": r, "p_value": p, "n_pairs": n})
 
     out = pd.DataFrame(rows)
     return LagCorrResult(pair_name=f"{x}__{y}", df=out)

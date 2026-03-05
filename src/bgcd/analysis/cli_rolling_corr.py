@@ -107,6 +107,12 @@ def _plot_rolling_with_npairs(
     fig = plt.figure(figsize=(12.5, 5.2))
     ax1 = fig.add_subplot(111)
     ax1.plot(d["time_utc"], d["r"])
+    # mark significant points if p_value exists
+    if "p_value" in d.columns:
+        sig = d["p_value"].notna() & (d["p_value"] < 0.05) & d["r"].notna()
+        if sig.any():
+            ax1.scatter(d.loc[sig, "time_utc"], d.loc[sig, "r"], s=12, alpha=0.8, label="p<0.05")
+            ax1.legend(loc="upper right", frameon=True, fontsize=9)
     ax1.axhline(0.0, linewidth=0.9)
     ax1.set_ylim(-1.0, 1.0)
     ax1.set_ylabel("rolling Pearson r")
@@ -304,7 +310,7 @@ if __name__ == "__main__":
 """
 
 python -m bgcd.analysis.cli_rolling_corr `
-  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/OUT/300534065378180/B_window/data/master_subset_best_window.csv" `
+  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT/300534065378180/B_window/data/master_subset_best_window.csv" `
   --config "analysis_config/analysis_config_min.yml" `
   --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT" `
   --plots-root "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots" `
@@ -314,7 +320,7 @@ python -m bgcd.analysis.cli_rolling_corr `
   --decimate-quiver 7
 
 python -m bgcd.analysis.cli_rolling_corr `
-  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/OUT/300534065379230/B_window/data/master_subset_best_window.csv" `
+  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT/300534065379230/B_window/data/master_subset_best_window.csv" `
   --config "analysis_config/analysis_config_min.yml" `
   --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT" `
   --plots-root "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots" `
@@ -324,7 +330,7 @@ python -m bgcd.analysis.cli_rolling_corr `
   --decimate-quiver 7
 
 python -m bgcd.analysis.cli_rolling_corr `
-  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/OUT/300534065470010/B_window/data/master_subset_best_window.csv" `
+  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT/300534065470010/B_window/data/master_subset_best_window.csv" `
   --config "analysis_config/analysis_config_min.yml" `
   --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT" `
   --plots-root "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots" `

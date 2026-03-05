@@ -53,19 +53,34 @@ def _plot_lag_curve(df_lag: pd.DataFrame, out_png: Path, title: str) -> None:
 
     # annotate best lag (by abs(r), among valid points)
     d = df_lag.dropna(subset=["r"]).copy()
+
+    # mark significant lags (p < 0.05)
+    if "p_value" in d.columns:
+        sig = d["p_value"].notna() & (d["p_value"] < 0.05)
+
+        if sig.any():
+            ax.scatter(
+                d.loc[sig, "lag_hours"],
+                d.loc[sig, "r"],
+                s=60,
+                marker="*",
+                zorder=4,
+                label="p < 0.05",
+            )
+
     if not d.empty:
         d["abs_r"] = d["r"].abs()
         best = d.sort_values("abs_r", ascending=False).iloc[0]
         ax.axvline(best["lag_hours"], linewidth=0.9, alpha=0.6)
-        ax.text(
-            float(best["lag_hours"]),
-            float(best["r"]),
-            f" best: lag={int(best['lag_hours'])}h, r={best['r']:.2f}, n={int(best['n_pairs'])}",
+        ax.annotate(
+            f"best: lag={int(best['lag_hours'])}h, r={best['r']:.2f}, n={int(best['n_pairs'])}",
+            xy=(float(best["lag_hours"]), float(best["r"])),
+            xytext=(10, 20),            # spostamento (x,y) in punti
+            textcoords="offset points",
             fontsize=9,
             ha="left",
             va="bottom",
         )
-
     fig.tight_layout()
     fig.savefig(out_png, dpi=170)
     plt.close(fig)
@@ -168,19 +183,19 @@ lag > 0: y viene dopo x → x anticipa y (possibile causalità “x → y”)
 lag < 0: y anticipa x (più strano fisicamente in molti casi)
 
 python -m bgcd.analysis.cli_lag_corr `
-  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/OUT/300534065378180/B_window/data/master_subset_best_window.csv" `
+  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT/300534065378180/B_window/data/master_subset_best_window.csv" `
   --config "analysis_config/analysis_config_min.yml" `
   --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT" `
   --plots-root "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots"
 
 python -m bgcd.analysis.cli_lag_corr `
-  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/OUT/300534065379230/B_window/data/master_subset_best_window.csv" `
+  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT/300534065379230/B_window/data/master_subset_best_window.csv" `
   --config "analysis_config/analysis_config_min.yml" `
   --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT" `
   --plots-root "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots"
 
 python -m bgcd.analysis.cli_lag_corr `
-  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/OUT/300534065470010/B_window/data/master_subset_best_window.csv" `
+  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT/300534065470010/B_window/data/master_subset_best_window.csv" `
   --config "analysis_config/analysis_config_min.yml" `
   --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT" `
   --plots-root "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots"

@@ -10,22 +10,19 @@ from typing import List, Tuple
 import numpy as np
 import pandas as pd
 
+from scipy.stats import pearsonr
+
+
+@dataclass
+class RollingCorrSeries:
+    pair_name: str
+    df: pd.DataFrame  # columns: time_utc, r, p_value, n_pairs
+
 
 @dataclass
 class RollingCorrSeries:
     pair_name: str
     df: pd.DataFrame  # columns: time_utc, r, n_pairs
-
-
-def _pearson_r(x: np.ndarray, y: np.ndarray) -> float:
-    if x.size < 2:
-        return np.nan
-    x0 = x - x.mean()
-    y0 = y - y.mean()
-    den = np.sqrt((x0 * x0).sum()) * np.sqrt((y0 * y0).sum())
-    if den == 0:
-        return np.nan
-    return float((x0 * y0).sum() / den)
 
 
 def rolling_corr_pair(
@@ -72,6 +69,7 @@ def rolling_corr_pair(
     out_t = []
     out_r = []
     out_n = []
+    out_p = []
 
     # We'll use integer indexing; create a pandas Series of times for comparisons
     t_series = pd.Series(d[time_col].to_list())
@@ -89,15 +87,19 @@ def rolling_corr_pair(
 
         n = int(ok.sum())
         if n >= int(min_points):
-            r = _pearson_r(xv[ok].astype(float), yv[ok].astype(float))
+            xw = xv[ok].astype(float)
+            yw = yv[ok].astype(float)
+            r, p = pearsonr(xw, yw)
         else:
             r = np.nan
+            p = np.nan
 
         out_t.append(ti)
         out_r.append(r)
+        out_p.append(p)
         out_n.append(n)
 
-    out = pd.DataFrame({"time_utc": out_t, "r": out_r, "n_pairs": out_n})
+        out = pd.DataFrame({"time_utc": out_t, "r": out_r, "p_value": out_p, "n_pairs": out_n})
     return RollingCorrSeries(pair_name=f"{x}__{y}", df=out)
 
 
