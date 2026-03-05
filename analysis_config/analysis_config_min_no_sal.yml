@@ -25,7 +25,6 @@ analysis:
   # -------------------------
   phys_vars:
     - sst_c
-    - salinity_psu
     - wspd
     - okubo_weiss
     - rotation_index

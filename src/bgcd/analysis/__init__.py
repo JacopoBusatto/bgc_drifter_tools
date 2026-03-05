@@ -4,9 +4,22 @@
 """
 bgcd.analysis
 
-Statistical analysis modules for BGC-SVP MASTER datasets.
-Currently includes:
-- preprocess: quality control, masking, time-axis checks
+Analysis + QC tools for BGC-SVP MASTER datasets.
+Lightweight exports only (no legacy preprocess imports).
 """
+from .qc_core import (  # noqa: F401
+    qc_time,
+    qc_duplicates,
+    qc_bounds,
+    qc_coverage,
+    QCTimeReport,
+    QCDuplicatesReport,
+    QCBoundsReport,
+    QCCoverageReport,
+)
 
-from .preprocess import apply_qc, QCResult  # noqa: F401
+from .overlap import (  # noqa: F401
+    find_overlap_windows,
+    OverlapResult,
+    OverlapWindow,
+)

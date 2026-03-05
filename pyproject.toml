@@ -17,6 +17,10 @@ dependencies = [
   "netCDF4",
   "matplotlib",
   "pyyaml",
+  "scikit-learn>=1.3",
+  "scikit-learn>=1.3",
+  "scipy",
+  "ruptures",
 ]
 
 [project.optional-dependencies]
