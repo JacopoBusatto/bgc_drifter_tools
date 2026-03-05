@@ -148,20 +148,20 @@ if __name__ == "__main__":
 
 """
 python -m bgcd.analysis.cli_coupling `
-  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/OUT/300534065378180/B_window/data/master_subset_best_window.csv" `
+  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT/300534065378180/B_window/data/master_subset_best_window.csv" `
   --config "analysis_config/analysis_config_min.yml" `
-  --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/OUT" `
+  --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT" `
   --plots-root "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots"
 
 python -m bgcd.analysis.cli_coupling `
-  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/OUT/300534065379230/B_window/data/master_subset_best_window.csv" `
+  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT/300534065379230/B_window/data/master_subset_best_window.csv" `
   --config "analysis_config/analysis_config_min.yml" `
-  --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/OUT" `
+  --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT" `
   --plots-root "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots"
 
 python -m bgcd.analysis.cli_coupling `
-  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/OUT/300534065470010/B_window/data/master_subset_best_window.csv" `
+  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT/300534065470010/B_window/data/master_subset_best_window.csv" `
   --config "analysis_config/analysis_config_min.yml" `
-  --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/OUT" `
+  --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT" `
   --plots-root "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots"
 """

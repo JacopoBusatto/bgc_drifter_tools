@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple
 
+from scipy.stats import pearsonr
+
 import numpy as np
 import pandas as pd
 
@@ -26,18 +28,6 @@ def _dedup_keep_order(items: Iterable[str]) -> List[str]:
             out.append(x)
             seen.add(x)
     return out
-
-
-def _pearson_r(x: np.ndarray, y: np.ndarray) -> float:
-    # assumes finite and same length >= 2
-    if x.size < 2:
-        return np.nan
-    x0 = x - x.mean()
-    y0 = y - y.mean()
-    den = np.sqrt((x0 * x0).sum()) * np.sqrt((y0 * y0).sum())
-    if den == 0:
-        return np.nan
-    return float((x0 * y0).sum() / den)
 
 
 def pairwise_pearson_phys_bio(
@@ -61,7 +51,10 @@ def pairwise_pearson_phys_bio(
 
     if n_total == 0:
         return PairwiseCorrResult(
-            table=pd.DataFrame(columns=["x", "y", "n_overlap", "frac_overlap", "pearson_r", "status", "reason"]),
+            table=pd.DataFrame(columns=[
+                "x", "y", "n_overlap", "frac_overlap",
+                "pearson_r", "p_value", "status", "reason"
+            ]),
             used_phys=phys_vars,
             used_bio=bio_vars,
             warnings=["Empty dataframe: nothing to analyze."],
@@ -112,7 +105,7 @@ def pairwise_pearson_phys_bio(
 
             xv = x[ok].to_numpy(dtype=float)
             yv = y[ok].to_numpy(dtype=float)
-            r = _pearson_r(xv, yv)
+            r, p = pearsonr(xv, yv)
             rows.append(
                 {
                     "x": xname,
@@ -120,6 +113,7 @@ def pairwise_pearson_phys_bio(
                     "n_overlap": n,
                     "frac_overlap": frac,
                     "pearson_r": r,
+                    "p_value": p,
                     "status": "ok",
                     "reason": "",
                 }
