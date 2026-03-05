@@ -23,22 +23,66 @@ def _write_text(path: Path, lines: List[str]) -> None:
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
+def _p_to_stars(p: float) -> str:
+    if np.isnan(p):
+        return ""
+    if p < 0.001:
+        return "***"
+    if p < 0.01:
+        return "**"
+    if p < 0.05:
+        return "*"
+    return ""
+
+
 def _make_heatmap(table: pd.DataFrame, phys: List[str], bio: List[str], out_png: Path, title: str) -> None:
     # build matrix phys x bio
     M = np.full((len(phys), len(bio)), np.nan, dtype=float)
+    P = np.full((len(phys), len(bio)), np.nan, dtype=float)
+
     for _, row in table.iterrows():
         if row.get("status") != "ok":
             continue
+
         x = row["x"]
         y = row["y"]
+
         if x in phys and y in bio:
             i = phys.index(x)
             j = bio.index(y)
+
             M[i, j] = float(row["pearson_r"])
+
+            if "p_value" in row:
+                P[i, j] = float(row["p_value"])
 
     fig = plt.figure(figsize=(max(6, 0.55 * len(bio)), max(4, 0.45 * len(phys))))
     ax = fig.add_subplot(111)
     im = ax.imshow(M, aspect="auto", vmin=-1, vmax=1)
+
+    # annotate cells with r and significance
+    for i in range(len(phys)):
+        for j in range(len(bio)):
+
+            r = M[i, j]
+            if np.isnan(r):
+                continue
+
+            p = P[i, j]
+            stars = _p_to_stars(p)
+
+            txt = f"{r:.2f}{stars}"
+
+            ax.text(
+                j,
+                i,
+                txt,
+                ha="center",
+                va="center",
+                fontsize=9,
+                color="black",
+            )
+
     ax.set_title(title)
 
     ax.set_yticks(np.arange(len(phys)))
