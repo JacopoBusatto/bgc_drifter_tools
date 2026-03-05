@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterable, List
 
 import pandas as pd
 
-from bgcd.analysis.qc_core import qc_time, qc_duplicates, qc_bounds, qc_coverage
+from bgcd.analysis.qc_core import qc_time, qc_duplicates, qc_bounds, qc_gap_fill, qc_coverage
 from bgcd.analysis.overlap import find_overlap_windows, OverlapResult
 
 
@@ -152,6 +152,14 @@ def main() -> None:
     max_gap_h = float(dw.get("max_gap_h", 6.0))
     prefer = str(dw.get("prefer", "duration"))
 
+    gap_cfg = (dw.get("gap_handling", {}) or {})
+    gap_max_fill_h = float(gap_cfg.get("max_fill_h", 0.0))
+    gap_method = str(gap_cfg.get("method", "time"))
+    gap_limit_area = str(gap_cfg.get("limit_area", "inside"))
+    gap_vars = _dedup_keep_order(gap_cfg.get("vars", []) or [])  # optional override
+    if not gap_vars:
+        gap_vars = required  # default: only required affect window continuity
+
     run_qc = _as_bool(args.run_qc)
     export_topk = _as_bool(args.export_topk)
     topk = int(args.topk)
@@ -180,6 +188,11 @@ def main() -> None:
     run_log.append(f"min_points: {min_points}")
     run_log.append(f"max_gap_h: {max_gap_h}")
     run_log.append(f"prefer: {prefer}")
+    run_log.append("[gap_handling]")
+    run_log.append(f"max_fill_h: {gap_max_fill_h}")
+    run_log.append(f"method: {gap_method}")
+    run_log.append(f"limit_area: {gap_limit_area}")
+    run_log.append(f"vars: {gap_vars}")
     run_log.append("")
 
     # sanity: required columns exist
@@ -221,6 +234,26 @@ def main() -> None:
             bounds_cfg=bounds_cfg,
         )
         warnings_all.extend(rep_bounds.warnings)
+
+        # STEP 3b: gap fill (optional)
+        if gap_max_fill_h > 0:
+            df_qc, rep_gap = qc_gap_fill(
+                df_qc,
+                time_col="time_utc",
+                vars_to_fill=gap_vars,
+                max_fill_h=gap_max_fill_h,
+                method=gap_method,
+                limit_area=gap_limit_area,
+            )
+            warnings_all.extend(rep_gap.warnings)
+
+            # write gap-fill report
+            print(out_qc)
+            rep_gap.per_var.to_csv(out_qc / "reports" / "qc_gap_fill_per_var.csv", index=False)
+            run_log.append(f"QC wrote: {out_qc / 'reports' / 'qc_gap_fill_per_var.csv'}")
+            if rep_gap.warnings:
+                run_log.append(f"QC gap_fill warnings: {len(rep_gap.warnings)}")
+            run_log.append("")
 
         # STEP 4: coverage (returns report + warnings list)
         rep_cov, cov_warnings = qc_coverage(
@@ -340,7 +373,7 @@ if __name__ == "__main__":
 python -m bgcd.analysis.cli_window `
   --master "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_master/master_300534065378180.csv" `
   --config "analysis_config/analysis_config_min.yml" `
-  --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/OUT" `
+  --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT" `
   --run-qc true `
   --topk 10 `
   --export-topk false
@@ -348,7 +381,7 @@ python -m bgcd.analysis.cli_window `
 python -m bgcd.analysis.cli_window `
   --master "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_master/master_300534065379230.csv" `
   --config "analysis_config/analysis_config_min.yml" `
-  --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/OUT" `
+  --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT" `
   --run-qc true `
   --topk 10 `
   --export-topk false
@@ -356,7 +389,7 @@ python -m bgcd.analysis.cli_window `
 python -m bgcd.analysis.cli_window `
   --master "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_master/master_300534065470010.csv" `
   --config "analysis_config/analysis_config_min.yml" `
-  --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/OUT" `
+  --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT" `
   --run-qc true `
   --topk 10 `
   --export-topk false

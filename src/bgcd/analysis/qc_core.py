@@ -8,6 +8,12 @@ import pandas as pd
 
 
 @dataclass
+class QCGapsFillReport:
+    per_var: pd.DataFrame  # var, n_missing_before, n_filled, n_missing_after, limit, max_fill_h
+    warnings: list[str]
+
+
+@dataclass
 class QCCoverageReport:
     per_var: pd.DataFrame
     warnings: list[str]
@@ -371,3 +377,131 @@ def qc_coverage(
 
     rep = QCCoverageReport(per_var=pd.DataFrame(rows), warnings=warnings)
     return rep, vars_to_check
+
+
+
+def qc_gap_fill(
+    df: pd.DataFrame,
+    *,
+    time_col: str = "time_utc",
+    vars_to_fill: List[str],
+    max_fill_h: float = 0.0,
+    method: str = "time",
+    limit_area: str = "inside",
+) -> Tuple[pd.DataFrame, QCGapsFillReport]:
+    """
+    Optional QC step: fill short NaN gaps for selected variables (after bounds masking).
+
+    Idea:
+      - In merged multi-sensor tables, single-row NaNs can fragment long analysis windows.
+      - We fill only *short* internal NaN runs using time-based interpolation.
+      - Long gaps are NOT filled (interpolate limit prevents it), and will still break windows if required.
+
+    How "short" is defined:
+      - compute dt_median_h from sorted time axis
+      - limit = floor(max_fill_h / dt_median_h)
+      - pandas interpolate(..., limit=limit, limit_area='inside')
+
+    Returns:
+      df_out: copy with filled values
+      report: QCGapsFillReport
+    """
+    df0 = df.copy()
+    warnings: list[str] = []
+
+    if time_col not in df0.columns:
+        raise ValueError(f"Missing {time_col!r} column for gap filling.")
+
+    if not vars_to_fill:
+        rep = QCGapsFillReport(
+            per_var=pd.DataFrame(columns=["var", "n_missing_before", "n_filled", "n_missing_after", "limit", "max_fill_h"]),
+            warnings=[],
+        )
+        return df0, rep
+
+    # Ensure datetime UTC and sorted
+    df0[time_col] = pd.to_datetime(df0[time_col], errors="coerce", utc=True)
+    df0 = df0.loc[df0[time_col].notna()].sort_values(time_col).copy()
+
+    # median dt (hours)
+    dt_median_h = None
+    if len(df0) >= 2:
+        t = df0[time_col].values.astype("datetime64[ns]")
+        dt = np.diff(t).astype("timedelta64[s]").astype(float) / 3600.0
+        if dt.size:
+            dt_median_h = float(np.nanmedian(dt))
+
+    max_fill_h = float(max_fill_h)
+    if max_fill_h <= 0:
+        # disabled, but keep a small report for traceability
+        rows = []
+        for v in vars_to_fill:
+            if v not in df0.columns:
+                continue
+            s = pd.to_numeric(df0[v], errors="coerce")
+            rows.append(
+                {"var": v, "n_missing_before": int(s.isna().sum()), "n_filled": 0, "n_missing_after": int(s.isna().sum()),
+                 "limit": 0, "max_fill_h": max_fill_h}
+            )
+        return df0, QCGapsFillReport(per_var=pd.DataFrame(rows), warnings=[])
+
+    if dt_median_h is None or not np.isfinite(dt_median_h) or dt_median_h <= 0:
+        warnings.append("[QC][gap_fill] Cannot compute a finite median dt; skipping gap filling.")
+        rep = QCGapsFillReport(
+            per_var=pd.DataFrame(columns=["var", "n_missing_before", "n_filled", "n_missing_after", "limit", "max_fill_h"]),
+            warnings=warnings,
+        )
+        return df0, rep
+
+    limit = int(np.floor(max_fill_h / dt_median_h + 1e-9))
+    if limit <= 0:
+        warnings.append(
+            f"[QC][gap_fill] max_fill_h={max_fill_h:.2f}h is smaller than median dt={dt_median_h:.2f}h; nothing to fill."
+        )
+        rep = QCGapsFillReport(
+            per_var=pd.DataFrame(columns=["var", "n_missing_before", "n_filled", "n_missing_after", "limit", "max_fill_h"]),
+            warnings=warnings,
+        )
+        return df0, rep
+
+    rows = []
+    t_index = df0[time_col]
+
+    for v in vars_to_fill:
+        if v not in df0.columns:
+            warnings.append(f"[QC][gap_fill] variable {v!r} not in dataframe; skipped.")
+            continue
+
+        if not pd.api.types.is_numeric_dtype(df0[v]):
+            warnings.append(f"[QC][gap_fill] variable {v!r} is not numeric; skipped.")
+            continue
+
+        s = pd.to_numeric(df0[v], errors="coerce")
+        n_before = int(s.isna().sum())
+
+        if n_before == 0:
+            rows.append({"var": v, "n_missing_before": 0, "n_filled": 0, "n_missing_after": 0, "limit": limit, "max_fill_h": max_fill_h})
+            continue
+
+        s2 = pd.Series(s.values, index=t_index.values)
+        try:
+            s_fill = s2.interpolate(method=method, limit=limit, limit_area=limit_area)
+        except Exception as e:
+            warnings.append(f"[QC][gap_fill] {v!r} interpolate failed ({type(e).__name__}: {e}); skipped.")
+            rows.append({"var": v, "n_missing_before": n_before, "n_filled": 0, "n_missing_after": n_before, "limit": limit, "max_fill_h": max_fill_h})
+            continue
+
+        n_after = int(pd.isna(s_fill.values).sum())
+        n_filled = n_before - n_after
+
+        df0[v] = s_fill.values
+        rows.append({"var": v, "n_missing_before": n_before, "n_filled": n_filled, "n_missing_after": n_after, "limit": limit, "max_fill_h": max_fill_h})
+
+    rep = QCGapsFillReport(per_var=pd.DataFrame(rows), warnings=warnings)
+    if not rep.per_var.empty:
+        tot_filled = int(rep.per_var["n_filled"].sum())
+        if tot_filled > 0:
+            rep.warnings = rep.warnings + [
+                f"[QC][gap_fill] filled {tot_filled} NaNs across {len(rep.per_var)} vars (limit={limit} samples, max_fill_h={max_fill_h:.1f}h)."
+            ]
+    return df0, rep

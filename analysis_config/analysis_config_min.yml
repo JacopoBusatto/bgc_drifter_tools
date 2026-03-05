@@ -19,7 +19,12 @@ analysis:
     min_points: 50
     max_gap_h: 6
     prefer: duration
-
+    
+    gap_handling:
+      max_fill_h: 6          # fill NaN runs up to this duration (hours); 0 disables
+      method: time           # pandas interpolate(method="time")
+      limit_area: inside     # do not extrapolate at edges
+      # vars: []             # optional: if omitted -> defaults to required
   # -------------------------
   # Variable groups (defaults)
   # -------------------------
