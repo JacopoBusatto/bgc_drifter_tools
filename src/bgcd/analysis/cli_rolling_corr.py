@@ -30,9 +30,11 @@ def _pick_default_pairs(df: pd.DataFrame) -> List[Tuple[str, str]]:
     """
     candidates = [
         ("salinity_psu", "DO2_c"),
-        ("salinity_psu", "oxy_comp_mgL_c"),  # if DO2_c missing but mg/L exists
+        ("salinity_psu", "chl"),
+        # ("salinity_psu", "oxy_comp_mgL_c"),  # if DO2_c missing but mg/L exists
         ("wspd", "DO2_c"),
-        ("wspd_mean", "DO2_c"),
+        ("wspd", "chl"),
+        ("wspd", "bbp_532_m1"),
         ("sst_c", "bbp_532_m1"),
         ("sst_c", "chl"),
         ("okubo_weiss", "chl"),
@@ -129,64 +131,18 @@ def _plot_rolling_with_npairs(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(
-        prog="bgcd.analysis.cli_rolling_corr",
-        description="Rolling correlation (time-based window, irregular sampling, no interpolation).",
-    )
-    ap.add_argument(
-        "--input",
-        required=True,
-        help="CSV to analyze (recommended: OUT/<pid>/B_window/data/master_subset_best_window.csv).",
-    )
+    ap = argparse.ArgumentParser(prog="bgcd.analysis.cli_rolling_corr", description="Rolling correlation (time-based window, irregular sampling, no interpolation).")
+    ap.add_argument("--input", required=True, help="CSV to analyze (recommended: OUT/<pid>/B_window/data/master_subset_best_window.csv).")
     ap.add_argument("--config", required=True, help="analysis_config_min.yml")
-    ap.add_argument(
-        "--plots-root",
-        default="plots",
-        help="Root folder for plot outputs. Will write: <plots-root>/<pid>/analysis/rolling/ ...",
-    )
-    ap.add_argument(
-        "--outdir",
-        default="OUT",
-        help="Base output directory for non-plot outputs (like CSVs). Will write: <outdir>/<pid>/analysis/rolling/ ...",
-    )
-    ap.add_argument(
-        "--window-hours",
-        type=int,          # <-- ERA float
-        default=48,
-        help="Rolling window in hours (INTEGER, time-based). Example: 48",
-    )
-    ap.add_argument(
-        "--center",
-        action="store_true",
-        help="Use centered window [t-W/2, t+W/2]. Default is centered.",
-    )
-    ap.add_argument(
-        "--trailing",
-        action="store_true",
-        help="Use trailing window [t-W, t]. If set, overrides --center.",
-    )
-    ap.add_argument(
-        "--min-points",
-        type=int,
-        default=10,
-        help="Minimum valid (x,y) pairs inside a rolling window to compute r.",
-    )
-    ap.add_argument(
-        "--pairs",
-        default="",
-        help="Optional pairs to compute: 'x1:y1,x2:y2'. If empty, uses a small default set.",
-    )
-    ap.add_argument(
-        "--with-trajectory-map",
-        action="store_true",
-        help="Also write map_trajectory_cartopy.png for THIS WINDOW using plot_master.plot_trajectory_cartopy().",
-    )
-    ap.add_argument(
-        "--decimate-quiver",
-        type=int,
-        default=10,
-        help="Decimation factor for wind arrows in the trajectory map.",
-    )
+    ap.add_argument("--plots-root", default="plots", help="Root folder for plot outputs. Will write: <plots-root>/<pid>/analysis/rolling/ ...")
+    ap.add_argument("--outdir", default="OUT", help="Base output directory for non-plot outputs (like CSVs). Will write: <outdir>/<pid>/analysis/rolling/ ...")
+    ap.add_argument("--window-hours", type=int, default=48, help="Rolling window in hours (INTEGER, time-based). Example: 48")
+    ap.add_argument("--center", action="store_true", help="Use centered window [t-W/2, t+W/2]. Default is centered.")
+    ap.add_argument("--trailing", action="store_true", help="Use trailing window [t-W, t]. If set, overrides --center.")
+    ap.add_argument("--min-points", type=int, default=10, help="Minimum valid (x,y) pairs inside a rolling window to compute r.")
+    ap.add_argument("--pairs", default="", help="Optional pairs to compute: 'x1:y1,x2:y2'. If empty, uses a small default set.")
+    ap.add_argument("--with-trajectory-map", action="store_true", help="Also write map_trajectory_cartopy.png for THIS WINDOW using plot_master.plot_trajectory_cartopy().")
+    ap.add_argument("--decimate-quiver", type=int, default=10, help="Decimation factor for wind arrows in the trajectory map.")
     args = ap.parse_args()
 
     in_path = Path(args.input)
