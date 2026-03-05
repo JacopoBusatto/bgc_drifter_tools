@@ -296,11 +296,23 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 """
 python -m bgcd.analysis.cli_pca `
-  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/OUT/300534065379230/B_window/data/master_subset_best_window.csv" `
+  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT/300534065378180/B_window/data/master_subset_best_window.csv" `
+  --config "analysis_config/analysis_config_min_no_sal.yml" `
+  --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT" `
+  --plots-root "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots"
+
+python -m bgcd.analysis.cli_pca `
+  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT/300534065379230/B_window/data/master_subset_best_window.csv" `
   --config "analysis_config/analysis_config_min.yml" `
   --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT" `
   --plots-root "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots"
-  
+
+python -m bgcd.analysis.cli_pca `
+  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT/300534065470010/B_window/data/master_subset_best_window.csv" `
+  --config "analysis_config/analysis_config_min.yml" `
+  --outdir "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT" `
+  --plots-root "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots"
 """

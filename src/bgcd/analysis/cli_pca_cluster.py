@@ -233,7 +233,7 @@ if __name__ == "__main__":
 """
 python -m bgcd.analysis.cli_pca_cluster `
   --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT/300534065378180/B_window/data/master_subset_best_window.csv" `
-  --config "analysis_config/analysis_config_min.yml" `
+  --config "analysis_config/analysis_config_min_no_sal.yml" `
   --out-root "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT" `
   --plots-root "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots" `
   --k 3 `
@@ -249,7 +249,7 @@ python -m bgcd.analysis.cli_pca_cluster `
 
 python -m bgcd.analysis.cli_pca_cluster `
   --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT/300534065470010/B_window/data/master_subset_best_window.csv" `
-  --config "analysis_config/analysis_config_min_no_sal.yml" `
+  --config "analysis_config/analysis_config_min.yml" `
   --out-root "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT" `
   --plots-root "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots" `
   --k 3 `

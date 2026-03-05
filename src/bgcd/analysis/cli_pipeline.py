@@ -194,6 +194,7 @@ if __name__ == "__main__":
     main()
 
 """
+
 python -m bgcd.analysis.cli_pipeline `
   --master "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/DATI_PLATFORMS/db_master/master_300534065378180.csv" `
   --config "analysis_config/analysis_config_min_no_sal.yml" `

@@ -19,7 +19,7 @@ analysis:
     min_points: 50
     max_gap_h: 6
     prefer: duration
-    
+
     gap_handling:
       max_fill_h: 6          # fill NaN runs up to this duration (hours); 0 disables
       method: time           # pandas interpolate(method="time")
@@ -57,9 +57,9 @@ analysis:
     # Hard physical bounds: outside => NaN + flag + warning summary
     # Use null for open-ended bounds.
     bounds:
-      sst_c:            {min: -2.0, max: 40.0}
-      temp_ctd_c:       {min: -2.0, max: 40.0}
-      salinity_psu:     {min: 30.0, max: 40.5}
+      sst_c:            {min:  1.0, max: 40.0}
+      temp_ctd_c:       {min:  1.0, max: 40.0}
+      salinity_psu:     {min: 25.0, max: 40.5}
       slp_mb:           {min: 900.0, max: 1100.0}
       wspd:             {min: 0.0,  max: 60.0}
       wspd_mean:        {min: 0.0,  max: 60.0}
