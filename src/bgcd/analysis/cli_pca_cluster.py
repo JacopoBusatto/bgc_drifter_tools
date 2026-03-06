@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 
 from sklearn.cluster import KMeans
 
@@ -80,6 +81,123 @@ def _plot_trajectory_clusters(scores: pd.DataFrame, out_png: Path, title: str) -
 
     cb = fig.colorbar(sc, ax=ax)
     cb.set_label("cluster")
+
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=170)
+    plt.close(fig)
+
+
+def _plot_ts_by_time_cluster(
+    scores: pd.DataFrame,
+    df_raw: pd.DataFrame,
+    out_png: Path,
+    title: str,
+    smooth_window: str = "36h",
+) -> None:
+    """
+    T-S diagram:
+      - x = salinity
+      - y = temperature
+      - color = time
+      - marker = PCA cluster
+      - thin smoothed trajectory in T-S space
+    """
+    d = df_raw.copy()
+    d["time_utc"] = pd.to_datetime(d["time_utc"], utc=True, errors="coerce")
+
+    s = scores[["time_utc", "cluster"]].copy()
+    s["time_utc"] = pd.to_datetime(s["time_utc"], utc=True, errors="coerce")
+
+    m = pd.merge(d, s, on="time_utc", how="inner")
+
+    temp_col = None
+    for c in ["temp_ctd_c", "sst_c"]:
+        if c in m.columns:
+            temp_col = c
+            break
+
+    sal_col = "salinity_psu" if "salinity_psu" in m.columns else None
+
+    if temp_col is None or sal_col is None:
+        return
+
+    m[temp_col] = pd.to_numeric(m[temp_col], errors="coerce")
+    m[sal_col] = pd.to_numeric(m[sal_col], errors="coerce")
+    m = m.dropna(subset=["time_utc", temp_col, sal_col, "cluster"]).copy()
+
+    if m.empty:
+        return
+
+    m = m.sort_values("time_utc").copy()
+    m["time_num"] = mdates.date2num(m["time_utc"].dt.to_pydatetime())
+
+    markers = ["o", "s", "^", "D", "v", "P", "X", "*", "<", ">"]
+    clusters = sorted(m["cluster"].dropna().unique())
+
+    fig = plt.figure(figsize=(7.6, 6.4))
+    ax = fig.add_subplot(111)
+
+    sc_for_cb = None
+
+    for i, cl in enumerate(clusters):
+        g = m[m["cluster"] == cl]
+        mk = markers[i % len(markers)]
+
+        sc = ax.scatter(
+            g[sal_col],
+            g[temp_col],
+            c=g["time_num"],
+            cmap="viridis",
+            s=34,
+            alpha=0.9,
+            marker=mk,
+            edgecolor="black",
+            linewidth=0.25,
+            label=f"cluster {int(cl)}",
+        )
+        sc_for_cb = sc
+
+    # smoothed T-S trajectory using time-based rolling
+    ts_src = (
+        m[["time_utc", sal_col, temp_col]]
+        .dropna()
+        .sort_values("time_utc")
+        .copy()
+    )
+
+    ts_line = (
+        ts_src
+        .rolling(smooth_window, on="time_utc", min_periods=3)[[sal_col, temp_col]]
+        .mean()
+    )
+    ts_line["time_utc"] = ts_src["time_utc"].values
+    ts_line = ts_line.dropna(subset=[sal_col, temp_col])
+
+    if not ts_line.empty:
+        ax.plot(
+            ts_line[sal_col],
+            ts_line[temp_col],
+            linewidth=1.1,
+            color="black",
+            alpha=0.75,
+            zorder=2,
+            label=f"T-S smoothed path ({smooth_window})",
+        )
+
+    ax.set_xlabel("Salinity [PSU]")
+    ax.set_ylabel(f"{temp_col} [°C]")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.5)
+
+    if sc_for_cb is not None:
+        cb = fig.colorbar(sc_for_cb, ax=ax)
+        cb.set_label("time")
+        locator = mdates.AutoDateLocator()
+        formatter = mdates.DateFormatter("%Y-%m-%d")
+        cb.ax.yaxis.set_major_locator(locator)
+        cb.ax.yaxis.set_major_formatter(formatter)
+
+    ax.legend(title="PCA cluster", loc="best", frameon=True)
 
     fig.tight_layout()
     fig.savefig(out_png, dpi=170)
@@ -198,7 +316,7 @@ def main() -> None:
         _plot_pc_scatter(scores, out_fig_dir / "pc_scatter_clusters.png", title=f"{pid} | PCA scores colored by cluster (k={args.k})")
     _plot_cluster_vs_time(scores, out_fig_dir / "cluster_vs_time.png", title=f"{pid} | cluster vs time (k={args.k})")
     _plot_trajectory_clusters(scores, out_fig_dir / "trajectory_clusters.png", title=f"{pid} | trajectory colored by cluster (k={args.k})")
-
+    _plot_ts_by_time_cluster(scores, df_raw, out_fig_dir / "ts_diagram_time_cluster.png", title=f"{pid} | T-S diagram colored by time, marker by cluster (k={args.k})")
     # log (text)
     lines = [
         f"INPUT: {in_path}",
