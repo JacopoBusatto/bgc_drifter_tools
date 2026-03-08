@@ -198,8 +198,8 @@ def main() -> None:
     df = pd.read_csv(in_path)
     pid = _platform_id_from_df_or_filename(df, in_path)
 
-    out_csv_dir = out_base / pid / "G_pca"
-    out_fig_dir = plots_root / pid / "analysis" / "pca"
+    out_csv_dir = out_base / pid / "F_pca"
+    out_fig_dir = plots_root / pid / "analysis" / "D_pca"
     _ensure_dir(out_csv_dir)
     _ensure_dir(out_fig_dir)
 

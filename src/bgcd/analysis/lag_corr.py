@@ -15,12 +15,6 @@ from scipy.stats import pearsonr
 @dataclass
 class LagCorrResult:
     pair_name: str
-    df: pd.DataFrame  # columns: lag_hours, r, n_pairs
-
-
-@dataclass
-class LagCorrResult:
-    pair_name: str
     df: pd.DataFrame  # columns: lag_hours, r, p_value, n_pairs
 
 

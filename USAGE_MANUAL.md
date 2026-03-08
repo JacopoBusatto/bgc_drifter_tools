@@ -661,7 +661,7 @@ MASTER CSV (1 drifter)
            min_points   = 50
        - se una variabile è troppo NaN -> viene ignorata + warning
        outputs:
-         OUT/<pid>/D_coupling/pairwise/
+         OUT/<pid>/C_coupling/pairwise/
            reports/pairwise_corr.csv
            figures/heatmap.png
            run_log.txt
@@ -670,7 +670,7 @@ MASTER CSV (1 drifter)
        - window = 48H
        - rolling_min_points = 10
        outputs:
-         OUT/<pid>/D_coupling/rolling/
+         OUT/<pid>/C_coupling/rolling/
            reports/rolling_corr_x__y.csv
            figures/rolling_corr_x__y.png
 
@@ -678,7 +678,7 @@ MASTER CSV (1 drifter)
        - max_lag_hours = 72
        - lag_match_tolerance_hours = 1.5 (merge_asof/nearest)
        outputs:
-         OUT/<pid>/D_coupling/lagged/
+         OUT/<pid>/C_coupling/lagged/
            reports/lagged_corr_x__y.csv
            figures/lagged_corr_x__y.png
 ```

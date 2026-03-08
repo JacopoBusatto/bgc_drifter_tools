@@ -32,13 +32,13 @@ analysis:
     - sst_c
     - salinity_psu
     - wspd
-    # - okubo_weiss
+    - okubo_weiss
     - rotation_index
 
   bio_vars:
-    - chl
-    - bbp_532_m1
-    - DO2_c
+    # - chl
+    # - bbp_532_m1
+    # - DO2_c
 
   # -------------------------
   # Quality Control (QC)

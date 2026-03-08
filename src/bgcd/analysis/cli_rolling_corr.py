@@ -156,8 +156,8 @@ def main() -> None:
     df = pd.read_csv(in_path)
     pid = _platform_id_from_df_or_filename(df, in_path)
 
-    out_csv_dir = out_base / pid / "E_rolling"
-    out_fig_dir = plots_root / pid / "analysis" / "rolling"
+    out_csv_dir = out_base / pid / "D_rolling"
+    out_fig_dir = plots_root / pid / "analysis" / "B_rolling"
 
     _ensure_dir(out_csv_dir)
     _ensure_dir(out_fig_dir)

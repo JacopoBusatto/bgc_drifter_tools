@@ -110,7 +110,7 @@ def main() -> None:
         help="Path to CSV to analyze (e.g., OUT/<pid>/B_window/data/master_subset_best_window.csv).",
     )
     ap.add_argument("--config", type=str, required=True, help="Path to analysis_config_min.yml.")
-    ap.add_argument("--outdir", type=str, default="OUT", help="Base output directory. Outputs are isolated in OUT/<platform_id>/D_coupling/...")
+    ap.add_argument("--outdir", type=str, default="OUT", help="Base output directory. Outputs are isolated in OUT/<platform_id>/C_coupling/...")
     ap.add_argument("--plots-root", type=str, default="plots", help="Root folder for plots: <root>/<pid>/analysis/coupling/ ...")
 
     args = ap.parse_args()
@@ -135,9 +135,9 @@ def main() -> None:
     plots_root = Path(args.plots_root)
 
     out_platform = out_base / pid
-    out_coup = out_platform / "D_coupling" / "pairwise"
+    out_coup = out_platform / "C_coupling" / "pairwise"
     out_reports = out_coup / "reports"
-    out_figs = plots_root / pid / "analysis" / "pairwise_coupling"
+    out_figs = plots_root / pid / "analysis" / "A_pairwise_coupling"
 
     _ensure_dir(out_reports)
     _ensure_dir(out_figs)

@@ -274,7 +274,7 @@ def main() -> None:
     if args.pca_scores:
         scores_path = Path(args.pca_scores)
     else:
-        scores_path = out_root / pid / "G_pca" / "pca_scores.csv"
+        scores_path = out_root / pid / "F_pca" / "pca_scores.csv"
     if not scores_path.exists():
         raise SystemExit(f"[ERR] pca_scores.csv not found: {scores_path}")
 
@@ -297,8 +297,8 @@ def main() -> None:
     scores["cluster"] = km.fit_predict(X)
 
     # outputs (match your structure)
-    out_text_dir = out_root / pid / "H_pca_cluster"
-    out_fig_dir = plots_root / pid / "analysis" / "pca_cluster"
+    out_text_dir = out_root / pid / "G_pca_cluster"
+    out_fig_dir = plots_root / pid / "analysis" / "E_pca_cluster"
     _ensure_dir(out_text_dir)
     _ensure_dir(out_fig_dir)
 
