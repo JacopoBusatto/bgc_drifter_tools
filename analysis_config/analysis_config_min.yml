@@ -144,7 +144,7 @@ analysis:
     rolling_window_hours: 48
     rolling_min_points: 10
     compute_lagged_corr: true
-    max_lag_hours: 120
+    max_lag_hours: 72
     lag_match_tolerance_hours: 1.5
     lag_step_hours: 3.0
     compute_mutual_information: false

@@ -20,6 +20,31 @@ from bgcd.analysis.lag_corr import lag_correlation_asof
 # -----------------------------------------------------------------------------
 # small utils
 # -----------------------------------------------------------------------------
+def _scale_centered_01(x: float, x_min: float, x_mean: float, x_max: float) -> float:
+    """
+    Map:
+      min  -> 0
+      mean -> 0.5
+      max  -> 1
+    """
+    if not np.isfinite(x) or not np.isfinite(x_min) or not np.isfinite(x_mean) or not np.isfinite(x_max):
+        return np.nan
+
+    if x_max <= x_min:
+        return np.nan
+
+    if x >= x_mean:
+        denom = x_max - x_mean
+        if denom == 0:
+            return 0.5
+        return 0.5 + 0.5 * (x - x_mean) / denom
+    else:
+        denom = x_mean - x_min
+        if denom == 0:
+            return 0.5
+        return 0.5 * (x - x_min) / denom
+    
+
 def _as_bool(x: Any) -> bool:
     if isinstance(x, bool):
         return x
@@ -72,6 +97,90 @@ def _build_segments(
 
     return d
 
+
+def _compute_cluster_radar_profile(
+    df_raw: pd.DataFrame,
+    scores_seg: pd.DataFrame,
+    *,
+    vars_for_profile: List[str],
+    time_col: str = "time_utc",
+    rotation_var: str = "rotation_index",
+) -> pd.DataFrame:
+    """
+    Radar profile in [0,1]:
+      - standard vars: cluster mean mapped so that
+            min -> 0, trajectory mean -> 0.5, max -> 1
+      - rotation_var: cluster median mapped from [-1,1] to [0,1]
+    """
+    d = df_raw.copy()
+    d[time_col] = pd.to_datetime(d[time_col], utc=True, errors="coerce")
+
+    s = scores_seg[[time_col, "cluster"]].copy()
+    s[time_col] = pd.to_datetime(s[time_col], utc=True, errors="coerce")
+
+    m = pd.merge(d, s, on=time_col, how="inner")
+
+    vars_present = [v for v in vars_for_profile if v in m.columns]
+    if not vars_present:
+        return pd.DataFrame()
+
+    for c in vars_present:
+        m[c] = pd.to_numeric(m[c], errors="coerce")
+
+    clusters = sorted(m["cluster"].dropna().unique())
+    rows = []
+
+    for cl in clusters:
+        g = m.loc[m["cluster"] == cl].copy()
+        row = {"cluster": int(cl)}
+
+        for v in vars_present:
+            gv = pd.to_numeric(g[v], errors="coerce")
+            tv = pd.to_numeric(m[v], errors="coerce")
+
+            if v == rotation_var:
+                med = float(np.nanmedian(gv.to_numpy())) if gv.notna().any() else np.nan
+                row[v] = 0.5 * med + 0.5 if np.isfinite(med) else np.nan
+            else:
+                x = float(np.nanmean(gv.to_numpy())) if gv.notna().any() else np.nan
+                x_min = float(np.nanmin(tv.to_numpy())) if tv.notna().any() else np.nan
+                x_mean = float(np.nanmean(tv.to_numpy())) if tv.notna().any() else np.nan
+                x_max = float(np.nanmax(tv.to_numpy())) if tv.notna().any() else np.nan
+
+                row[v] = _scale_centered_01(x, x_min, x_mean, x_max)
+
+        rows.append(row)
+
+    return pd.DataFrame(rows).set_index("cluster").sort_index()
+
+
+def _smooth_time_series(
+    df: pd.DataFrame,
+    *,
+    col: str,
+    time_col: str = "time_utc",
+    window: str = "12h",
+    min_periods: int = 2,
+) -> pd.Series:
+    if col not in df.columns or time_col not in df.columns:
+        return pd.Series(index=df.index, dtype=float)
+
+    d = df[[time_col, col]].copy()
+    d[time_col] = pd.to_datetime(d[time_col], utc=True, errors="coerce")
+    d[col] = pd.to_numeric(d[col], errors="coerce")
+
+    d = d.dropna(subset=[time_col]).sort_values(time_col)
+
+    s = (
+        d.set_index(time_col)[col]
+        .rolling(window=window, min_periods=min_periods)
+        .mean()
+    )
+
+    out = pd.Series(index=d.index, data=s.to_numpy())
+    out = out.reindex(df.index)
+
+    return out
 
 def _merge_short_segments(
     scores_seg: pd.DataFrame,
@@ -247,6 +356,81 @@ def _best_lag_row(df_lag: pd.DataFrame) -> pd.Series | None:
 # -----------------------------------------------------------------------------
 # plotting
 # -----------------------------------------------------------------------------
+def _plot_best_lag_by_cluster(
+    df_pair: pd.DataFrame,
+    out_png: Path,
+    *,
+    title: str,
+) -> None:
+    if df_pair.empty:
+        return
+
+    d = df_pair.copy()
+    d = d.dropna(subset=["cluster", "best_lag_hours", "best_abs_r"])
+
+    if d.empty:
+        return
+
+    fig = plt.figure(figsize=(8.8, 4.8))
+    ax = fig.add_subplot(111)
+
+    # jitter piccolo sull'asse x per non sovrapporre i punti
+    rng = np.random.default_rng(0)
+    x = d["cluster"].to_numpy(dtype=float)
+    xj = x + rng.uniform(-0.08, 0.08, size=len(d))
+
+    sizes = 40 + 220 * d["best_abs_r"].clip(lower=0, upper=1).to_numpy(dtype=float)
+
+    sig = d["significant_any"].fillna(False).to_numpy(dtype=bool)
+
+    # punti significativi
+    if sig.any():
+        ax.scatter(
+            xj[sig],
+            d.loc[sig, "best_lag_hours"],
+            s=sizes[sig],
+            alpha=0.85,
+            label="significant",
+        )
+
+    # punti non significativi
+    if (~sig).any():
+        ax.scatter(
+            xj[~sig],
+            d.loc[~sig, "best_lag_hours"],
+            s=sizes[~sig],
+            alpha=0.35,
+            marker="x",
+            label="not significant",
+        )
+
+    # opzionale: etichetta con segment_id
+    for _, row in d.iterrows():
+        ax.annotate(
+            f"{int(row['segment_id'])}",
+            xy=(float(row["cluster"]), float(row["best_lag_hours"])),
+            xytext=(4, 4),
+            textcoords="offset points",
+            fontsize=8,
+            alpha=0.8,
+        )
+
+    ax.axhline(0.0, linewidth=0.9, alpha=0.7)
+    ax.set_xlabel("cluster")
+    ax.set_ylabel("best lag (hours)")
+    ax.set_title(title)
+
+    clusts = sorted(pd.unique(d["cluster"]))
+    ax.set_xticks(clusts)
+    ax.set_xticklabels([f"{int(c)}" for c in clusts])
+
+    ax.legend(loc="best", frameon=True, fontsize=8)
+
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=170)
+    plt.close(fig)
+
+
 def _plot_trajectory_clusters(
     scores_seg: pd.DataFrame,
     out_png: Path,
@@ -272,7 +456,7 @@ def _plot_trajectory_clusters(
         s=30,
         alpha=0.9,
         edgecolor="none",
-        cmap="tab10",
+        # cmap="tab10",
     )
 
     # thin path underneath
@@ -284,6 +468,201 @@ def _plot_trajectory_clusters(
 
     cb = fig.colorbar(sc, ax=ax)
     cb.set_label("cluster")
+
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=170)
+    plt.close(fig)
+
+
+def _compute_cluster_regime_profiles(
+    df_raw: pd.DataFrame,
+    scores_seg: pd.DataFrame,
+    *,
+    vars_for_profile: List[str],
+    time_col: str = "time_utc",
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Returns:
+      - cluster_means_raw: mean per cluster in physical units
+      - cluster_means_z:   z-score of cluster means using full-trajectory mean/std
+      - cluster_means_mm:  min-max normalized cluster means using full trajectory min/max
+    """
+    d = df_raw.copy()
+    d[time_col] = pd.to_datetime(d[time_col], utc=True, errors="coerce")
+
+    s = scores_seg[[time_col, "cluster"]].copy()
+    s[time_col] = pd.to_datetime(s[time_col], utc=True, errors="coerce")
+
+    m = pd.merge(d, s, on=time_col, how="inner")
+
+    vars_present = [v for v in vars_for_profile if v in m.columns]
+    if not vars_present:
+        empty = pd.DataFrame()
+        return empty, empty, empty
+
+    for c in vars_present:
+        m[c] = pd.to_numeric(m[c], errors="coerce")
+
+    # raw cluster means
+    cluster_means_raw = (
+        m.groupby("cluster")[vars_present]
+        .mean()
+        .sort_index()
+    )
+
+    # trajectory-wide stats
+    global_mean = m[vars_present].mean()
+    global_std = m[vars_present].std(ddof=0).replace(0, np.nan)
+
+    global_min = m[vars_present].min()
+    global_max = m[vars_present].max()
+    global_rng = (global_max - global_min).replace(0, np.nan)
+
+    # z-score of cluster means
+    cluster_means_z = (cluster_means_raw - global_mean) / global_std
+
+    # min-max normalization of cluster means
+    cluster_means_mm = (cluster_means_raw - global_min) / global_rng
+
+    return cluster_means_raw, cluster_means_z, cluster_means_mm
+
+
+def _plot_cluster_heatmap_zscore(
+    df_z: pd.DataFrame,
+    out_png: Path,
+    *,
+    title: str,
+) -> None:
+    if df_z.empty:
+        return
+
+    fig = plt.figure(figsize=(1.2 * len(df_z.columns) + 2.5, 0.9 * len(df_z.index) + 2.2))
+    ax = fig.add_subplot(111)
+
+    arr = df_z.to_numpy(dtype=float)
+    vmax = np.nanmax(np.abs(arr))
+    if not np.isfinite(vmax) or vmax == 0:
+        vmax = 1.0
+
+    im = ax.imshow(arr, aspect="auto", cmap="coolwarm", vmin=-vmax, vmax=vmax)
+
+    ax.set_xticks(np.arange(len(df_z.columns)))
+    ax.set_xticklabels(df_z.columns, rotation=45, ha="right")
+    ax.set_yticks(np.arange(len(df_z.index)))
+    ax.set_yticklabels([f"cluster {int(c)}" for c in df_z.index])
+
+    # annotate cells
+    for i in range(arr.shape[0]):
+        for j in range(arr.shape[1]):
+            val = arr[i, j]
+            if np.isfinite(val):
+                ax.text(j, i, f"{val:.2f}", ha="center", va="center", fontsize=8)
+
+    ax.set_title(title)
+
+    cb = fig.colorbar(im, ax=ax)
+    cb.set_label("z-score of cluster mean\n(relative to full trajectory)")
+
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=170)
+    plt.close(fig)
+
+
+def _plot_cluster_radar_relative(
+    df_radar: pd.DataFrame,
+    out_png: Path,
+    *,
+    title: str,
+) -> None:
+    if df_radar.empty or len(df_radar.columns) < 3:
+        return
+
+    labels = list(df_radar.columns)
+    n = len(labels)
+
+    angles = np.linspace(0, 2 * np.pi, n, endpoint=False).tolist()
+    angles += angles[:1]
+
+    fig = plt.figure(figsize=(7.4, 7.4))
+    ax = fig.add_subplot(111, polar=True)
+
+    colors = plt.cm.tab10.colors
+
+    for i, cl in enumerate(df_radar.index):
+        vals = df_radar.loc[cl].to_numpy(dtype=float)
+        vals = np.nan_to_num(vals, nan=0.0)
+        vals = vals.tolist()
+        vals += vals[:1]
+
+        ax.plot(
+            angles,
+            vals,
+            linewidth=2,
+            color=colors[i % len(colors)],
+            label=f"cluster {int(cl)}",
+        )
+        ax.fill(
+            angles,
+            vals,
+            alpha=0.10,
+            color=colors[i % len(colors)],
+        )
+
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(labels)
+
+    # dynamic radial limit
+    # vmax = np.nanmax(df_radar.to_numpy(dtype=float))
+    # if not np.isfinite(vmax):
+    #     vmax = 1.5
+    # vmax = max(1.2, min(vmax * 1.10, 3.0))
+    vmax = 1
+
+    ax.set_ylim(0, vmax)
+    ax.set_title(title, pad=20)
+    ax.legend(loc="upper right", bbox_to_anchor=(1.28, 1.10), frameon=True)
+
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=170)
+    plt.close(fig)
+
+
+def _plot_cluster_radar_minmax(
+    df_mm: pd.DataFrame,
+    out_png: Path,
+    *,
+    title: str,
+) -> None:
+    if df_mm.empty or len(df_mm.columns) < 3:
+        return
+
+    labels = list(df_mm.columns)
+    n = len(labels)
+
+    angles = np.linspace(0, 2 * np.pi, n, endpoint=False).tolist()
+    angles += angles[:1]
+
+    fig = plt.figure(figsize=(7.2, 7.2))
+    ax = fig.add_subplot(111, polar=True)
+
+    colors = plt.cm.tab10.colors
+
+    for i, cl in enumerate(df_mm.index):
+        vals = df_mm.loc[cl].to_numpy(dtype=float)
+        vals = np.nan_to_num(vals, nan=0.0)
+        vals = vals.tolist()
+        vals += vals[:1]
+
+        ax.plot(angles, vals, linewidth=2, color=colors[i % len(colors)], label=f"cluster {int(cl)}")
+        ax.fill(angles, vals, alpha=0.10, color=colors[i % len(colors)])
+
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(labels)
+    ax.set_ylim(0, 1)
+    ax.set_yticks([0.25, 0.50, 0.75, 1.00])
+    ax.set_yticklabels(["0.25", "0.50", "0.75", "1.00"])
+    ax.set_title(title, pad=20)
+    ax.legend(loc="upper right", bbox_to_anchor=(1.25, 1.10), frameon=True)
 
     fig.tight_layout()
     fig.savefig(out_png, dpi=170)
@@ -406,6 +785,236 @@ def _plot_lag_curve_summary(
     plt.close(fig)
 
 
+def _plot_pc_space(
+    scores_seg: pd.DataFrame,
+    out_png: Path,
+    *,
+    title: str,
+) -> None:
+
+    if "PC1" not in scores_seg.columns or "PC2" not in scores_seg.columns:
+        return
+
+    fig = plt.figure(figsize=(7.5, 6))
+    ax = fig.add_subplot(111)
+
+    clusters = scores_seg["cluster"].unique()
+    colors = plt.cm.tab10.colors
+
+    for cl in clusters:
+        g = scores_seg.loc[scores_seg["cluster"] == cl]
+
+        ax.scatter(
+            g["PC1"],
+            g["PC2"],
+            s=35,
+            alpha=0.8,
+            label=f"cluster {cl}",
+            color=colors[int(cl) % len(colors)],
+        )
+
+    ax.axhline(0, linewidth=0.8, alpha=0.4)
+    ax.axvline(0, linewidth=0.8, alpha=0.4)
+
+    ax.set_xlabel("PC1")
+    ax.set_ylabel("PC2")
+    ax.set_title(title)
+
+    ax.legend()
+
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=170)
+    plt.close(fig)
+
+def _plot_ts_clusters(
+    merged: pd.DataFrame,
+    out_png: Path,
+    *,
+    title: str,
+    smooth_window: str = "24h",
+    smooth_min_periods: int = 3,
+) -> None:
+
+    if "salinity_psu" not in merged.columns:
+        return
+
+    if "sst_c" not in merged.columns and "temp_ctd_c" not in merged.columns:
+        return
+
+    T = "temp_ctd_c" if "temp_ctd_c" in merged.columns else "sst_c"
+
+    d = merged.copy()
+    d["time_utc"] = pd.to_datetime(d["time_utc"], utc=True, errors="coerce")
+
+    d = d.dropna(subset=["time_utc", "salinity_psu", T, "cluster"]).copy()
+    if d.empty:
+        return
+
+    d = d.sort_values("time_utc").copy()
+
+    fig = plt.figure(figsize=(7.5, 6))
+    ax = fig.add_subplot(111)
+
+    clusters = sorted(d["cluster"].unique())
+    colors = plt.cm.tab10.colors
+
+    # ------------------------------------------------------------------
+    # scatter by cluster
+    # ------------------------------------------------------------------
+    for cl in clusters:
+        g = d.loc[d["cluster"] == cl]
+
+        ax.scatter(
+            g["salinity_psu"],
+            g[T],
+            s=35,
+            alpha=0.8,
+            color=colors[int(cl) % len(colors)],
+            label=f"cluster {cl}",
+            edgecolor="none",
+            zorder=2,
+        )
+
+    # ------------------------------------------------------------------
+    # smoothed TS path in time order
+    # ------------------------------------------------------------------
+    ts_line = d[["time_utc", "salinity_psu", T]].copy()
+
+    ts_smooth = (
+        ts_line
+        .rolling(
+            smooth_window,
+            on="time_utc",
+            min_periods=smooth_min_periods,
+        )[["salinity_psu", T]]
+        .mean()
+    )
+
+    ts_smooth["time_utc"] = ts_line["time_utc"].values
+    ts_smooth = ts_smooth.dropna(subset=["salinity_psu", T]).copy()
+
+    if not ts_smooth.empty:
+        ax.plot(
+            ts_smooth["salinity_psu"],
+            ts_smooth[T],
+            color="black",
+            linewidth=1.5,
+            alpha=0.4,
+            zorder=3,
+            label=f"T-S path ({smooth_window} smooth)",
+        )
+
+        # start marker
+        s0 = ts_smooth.iloc[0]
+        ax.scatter(
+            [s0["salinity_psu"]],
+            [s0[T]],
+            s=90,
+            marker="o",
+            facecolor="none",
+            edgecolor="black",
+            linewidth=1.5,
+            zorder=4,
+        )
+        ax.annotate(
+            "START",
+            xy=(float(s0["salinity_psu"]), float(s0[T])),
+            xytext=(6, 6),
+            textcoords="offset points",
+            fontsize=9,
+            ha="left",
+            va="bottom",
+        )
+
+        # end marker
+        s1 = ts_smooth.iloc[-1]
+        ax.scatter(
+            [s1["salinity_psu"]],
+            [s1[T]],
+            s=90,
+            marker="s",
+            facecolor="none",
+            edgecolor="black",
+            linewidth=1.5,
+            zorder=4,
+        )
+        ax.annotate(
+            "END",
+            xy=(float(s1["salinity_psu"]), float(s1[T])),
+            xytext=(6, -8),
+            textcoords="offset points",
+            fontsize=9,
+            ha="left",
+            va="top",
+        )
+
+    ax.set_xlabel("Salinity (psu)")
+    ax.set_ylabel("Temperature (°C)")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.25)
+
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=170)
+    plt.close(fig)
+
+def _plot_lag_cluster(
+    curves: list,
+    out_png: Path,
+    *,
+    title: str,
+):
+
+    if not curves:
+        return
+
+    fig = plt.figure(figsize=(9, 4.5))
+    ax = fig.add_subplot(111)
+
+    colors = plt.cm.tab20.colors
+
+    for i, item in enumerate(curves):
+
+        df_lag = item["df_lag"]
+        seg = item["segment_id"]
+
+        color = colors[i % len(colors)]
+
+        ax.plot(
+            df_lag["lag_hours"],
+            df_lag["r"],
+            linewidth=1.4,
+            color=color,
+            label=f"seg {seg}",
+        )
+
+        sig = df_lag["p_value"].notna() & (df_lag["p_value"] < 0.05)
+
+        if sig.any():
+
+            ax.scatter(
+                df_lag.loc[sig, "lag_hours"],
+                df_lag.loc[sig, "r"],
+                s=45,
+                color=color,
+                zorder=4,
+            )
+
+    ax.axhline(0, linewidth=0.8)
+    ax.axvline(0, linewidth=0.8)
+
+    ax.set_ylim(-1, 1)
+
+    ax.set_xlabel("lag (hours)")
+    ax.set_ylabel("Pearson r")
+
+    ax.set_title(title)
+
+    ax.legend(ncol=2, fontsize=8)
+
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=170)
+    plt.close(fig)
 # -----------------------------------------------------------------------------
 # main
 # -----------------------------------------------------------------------------
@@ -430,6 +1039,8 @@ def main() -> None:
     ap.add_argument("--segment-min-duration-days", type=float, default=1.0, help="Minimum segment duration to keep")
     ap.add_argument("--segment-min-points", type=int, default=8, help="Minimum number of points to keep a segment")
     ap.add_argument("--merge-short-segments-points", type=int, default=3, help="Merge segments shorter than this number of points")
+
+    ap.add_argument("--rot-smooth", type=str, default=None, help="Optional time-based smoothing window for rotation_index before PCA, e.g. 12h")
 
     ap.add_argument("--max-lag-hours", type=int, default=None, help="Override YAML max_lag_hours")
     ap.add_argument("--lag-step-hours", type=int, default=None, help="Override YAML lag_step_hours")
@@ -477,29 +1088,57 @@ def main() -> None:
 
     fig_pca_dir = plots_root / pid / "analysis" / "H_phys_pca"
     fig_reg_dir = plots_root / pid / "analysis" / "I_phys_regimes"
-
+    
     out_lag_dir = out_root / pid / "J_regime_lag"
     out_lag_single_csv = out_lag_dir / "csv_single"
-    out_lag_single_fig = plots_root / pid / "analysis" / "J_regime_lag" / "single"
-    out_lag_summary_fig = plots_root / pid / "analysis" / "J_regime_lag" / "summary"
+    fig_lag_single_dir = plots_root / pid / "analysis" / "J_regime_lag" / "single"
+    fig_lag_summary_dir = plots_root / pid / "analysis" / "J_regime_lag" / "summary"
 
+    fig_profile_dir = plots_root / pid / "analysis" / "K_phys_regime_profiles"
+    fig_bestlag_dir = plots_root / pid / "analysis" / "L_best_lag_by_cluster"
+
+    _ensure_dir(fig_bestlag_dir)
+    _ensure_dir(fig_profile_dir)
     _ensure_dir(out_lag_dir)
     _ensure_dir(out_lag_single_csv)
-    _ensure_dir(out_lag_single_fig)
-    _ensure_dir(out_lag_summary_fig)
+    _ensure_dir(fig_lag_single_dir)
+    _ensure_dir(fig_lag_summary_dir)
     _ensure_dir(out_pca_dir)
     _ensure_dir(out_reg_dir)
     _ensure_dir(fig_pca_dir)
     _ensure_dir(fig_reg_dir)
 
+
+    # -------------------------------------------------------------------------
+    # optional smoothing of rotation index before PCA
+    # -------------------------------------------------------------------------
+    df_pca = df.copy()
+
+    phys_vars_pca = list(phys_vars)
+
+    if args.rot_smooth and "rotation_index" in df_pca.columns and "rotation_index" in phys_vars_pca:
+        df_pca["rotation_index_smooth"] = _smooth_time_series(
+            df_pca,
+            col="rotation_index",
+            time_col="time_utc",
+            window=str(args.rot_smooth),
+            min_periods=2,
+        )
+
+        phys_vars_pca = [
+            "rotation_index_smooth" if v == "rotation_index" else v
+            for v in phys_vars_pca
+        ]
+    else:
+        phys_vars_pca = phys_vars
     # -------------------------------------------------------------------------
     # physical PCA only
     # -------------------------------------------------------------------------
     keep_cols = [c for c in ["lat", "lon"] if c in df.columns]
 
     res = run_pca(
-        df,
-        variables=phys_vars,
+        df_pca,
+        variables=phys_vars_pca,
         time_col="time_utc",
         keep_cols=keep_cols,
         n_components=args.n_components,
@@ -569,6 +1208,14 @@ def main() -> None:
     s_join = scores_seg[["time_utc", "cluster", "segment_id", "segment_is_valid"]].copy()
     merged = pd.merge(d_raw, s_join, on="time_utc", how="inner")
 
+
+    _plot_ts_clusters(
+        merged,
+        fig_reg_dir / "ts_clusters.png",
+        title=f"{pid} | TS diagram colored by cluster",
+        smooth_window="36h",
+    )
+
     rows_summary: List[Dict[str, Any]] = []
     vars_for_summary = [c for c in all_vars if c in merged.columns]
 
@@ -584,6 +1231,90 @@ def main() -> None:
 
     cluster_summary = pd.DataFrame(rows_summary)
 
+    profile_vars_phys = [
+        v for v in phys_vars
+        if v in merged.columns
+    ]
+
+    profile_vars_bio = [
+        v for v in ["chl", "bbp_532_m1", "DO2_c"]
+        if v in merged.columns
+    ]
+    # -------------------------------------------------------------------------
+    # cluster regime profiles
+    # -------------------------------------------------------------------------
+    prof_raw_phys, prof_z_phys, prof_mm_phys = _compute_cluster_regime_profiles(
+        df,
+        scores_seg,
+        vars_for_profile=profile_vars_phys,
+        time_col="time_utc",
+    )
+
+    if not prof_raw_phys.empty:
+        prof_raw_phys.to_csv(out_reg_dir / "cluster_profile_phys_raw.csv")
+        prof_z_phys.to_csv(out_reg_dir / "cluster_profile_phys_zscore.csv")
+        prof_mm_phys.to_csv(out_reg_dir / "cluster_profile_phys_minmax.csv")
+
+        _plot_cluster_heatmap_zscore(
+            prof_z_phys,
+            fig_profile_dir / "cluster_profile_phys_heatmap_zscore.png",
+            title=f"{pid} | physical regime profile (z-score heatmap)",
+        )
+
+        prof_radar_phys = _compute_cluster_radar_profile(
+            df,
+            scores_seg,
+            vars_for_profile=profile_vars_phys,
+            time_col="time_utc",
+            rotation_var="rotation_index",
+        )
+
+        if not prof_radar_phys.empty:
+            prof_radar_phys.to_csv(out_reg_dir / "cluster_profile_phys_radar.csv")
+
+            prof_radar_phys_plot = prof_radar_phys#.rename(
+            #     columns={"rotation_index": "RI_median→[0,1]"}
+            # )
+
+            _plot_cluster_radar_relative(
+                prof_radar_phys_plot,
+                fig_profile_dir / "cluster_profile_phys_radar_relative.png",
+                title=f"{pid} | physical regime profile (radar, cluster/traj mean; RI median mapped to [0,1])",
+            )
+        prof_raw_bio, prof_z_bio, prof_mm_bio = _compute_cluster_regime_profiles(
+        df,
+        scores_seg,
+        vars_for_profile=profile_vars_bio,
+        time_col="time_utc",
+    )
+
+    if not prof_raw_bio.empty:
+        prof_raw_bio.to_csv(out_reg_dir / "cluster_profile_bio_raw.csv")
+        prof_z_bio.to_csv(out_reg_dir / "cluster_profile_bio_zscore.csv")
+        prof_mm_bio.to_csv(out_reg_dir / "cluster_profile_bio_minmax.csv")
+
+        _plot_cluster_heatmap_zscore(
+            prof_z_bio,
+            fig_profile_dir / "cluster_profile_bio_heatmap_zscore.png",
+            title=f"{pid} | biogeochemical regime signature (z-score heatmap)",
+        )
+
+        prof_radar_bio = _compute_cluster_radar_profile(
+            df,
+            scores_seg,
+            vars_for_profile=profile_vars_bio,
+            time_col="time_utc",
+            rotation_var="rotation_index",  # irrilevante qui, ma ok lasciarlo
+        )
+
+        if not prof_radar_bio.empty:
+            prof_radar_bio.to_csv(out_reg_dir / "cluster_profile_bio_radar.csv")
+
+            _plot_cluster_radar_relative(
+                prof_radar_bio,
+                fig_profile_dir / "cluster_profile_bio_radar_relative.png",
+                title=f"{pid} | biogeochemical regime signature (radar, min→0, mean→0.5, max→1)",
+            )
     # -------------------------------------------------------------------------
     # write outputs
     # -------------------------------------------------------------------------
@@ -597,14 +1328,19 @@ def main() -> None:
         title=f"{pid} | trajectory colored by cluster (phys PCA, k={args.k})",
     )
 
+    _plot_pc_space(
+        scores_seg,
+        fig_reg_dir / "pc_space_clusters.png",
+        title=f"{pid} | PC space (PC1 vs PC2)",
+    )
 
-        # -------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
     # lag correlation by valid segment
     # -------------------------------------------------------------------------
     pairs = _make_variable_pairs(phys_vars, bio_vars, merged.columns)
 
     lag_summary_rows: List[Dict[str, Any]] = []
-    summary_curves: Dict[str, List[Dict[str, Any]]] = {}
+    summary_curves: Dict[str, Dict[int, List[Dict[str, Any]]]] = {}
 
     valid_seg_ids_sorted = (
         seg_summary.loc[seg_summary["is_valid"], "segment_id"]
@@ -647,7 +1383,7 @@ def main() -> None:
             res_lag.df.to_csv(out_csv, index=False)
 
             if write_single_lag_plots:
-                out_png = out_lag_single_fig / f"lag_seg{seg_id:03d}_cl{cluster_id}_{pair_name}.png"
+                out_png = fig_lag_single_dir / f"lag_seg{seg_id:03d}_cl{cluster_id}_{pair_name}.png"
                 _plot_lag_curve_single(
                     res_lag.df,
                     out_png,
@@ -670,6 +1406,8 @@ def main() -> None:
                     "n_points": int(seg_meta["n_points"]),
                     "x": x,
                     "y": y,
+                    "rot_smooth": args.rot_smooth,
+                    "phys_vars_pca": phys_vars_pca,
                     "pair_name": pair_name,
                     "best_lag_hours": float(best["lag_hours"]) if best is not None else np.nan,
                     "best_r": float(best["r"]) if best is not None else np.nan,
@@ -682,25 +1420,46 @@ def main() -> None:
                 }
             )
 
-            summary_curves.setdefault(pair_name, []).append(
+            summary_curves.setdefault(pair_name, {})
+            summary_curves[pair_name].setdefault(cluster_id, [])
+
+            summary_curves[pair_name][cluster_id].append(
                 {
                     "df_lag": res_lag.df.copy(),
-                    "cluster": cluster_id,
                     "segment_id": seg_id,
                 }
             )
 
+
     lag_summary_df = pd.DataFrame(lag_summary_rows)
     lag_summary_df.to_csv(out_lag_dir / "regime_lag_summary.csv", index=False)
 
-    if write_summary_lag_plots:
-        for pair_name, curves in summary_curves.items():
-            out_png = out_lag_summary_fig / f"lag_summary_{pair_name}.png"
-            _plot_lag_curve_summary(
-                curves,
+    # -------------------------------------------------------------------------
+    # best lag by cluster (one plot per variable pair)
+    # -------------------------------------------------------------------------
+    if not lag_summary_df.empty:
+        for pair_name, gpair in lag_summary_df.groupby("pair_name", sort=True):
+            out_png = fig_bestlag_dir / f"best_lag_{pair_name}.png"
+            _plot_best_lag_by_cluster(
+                gpair,
                 out_png,
-                title=f"{pid} | lag summary | {pair_name}",
+                title=f"{pid} | best lag by cluster | {pair_name}",
             )
+
+    if write_summary_lag_plots:
+        for pair_name, cluster_dict in summary_curves.items():
+
+            pair_dir = fig_lag_summary_dir / pair_name
+            pair_dir.mkdir(parents=True, exist_ok=True)
+
+            for cluster_id, curves in cluster_dict.items():
+                out_png = pair_dir / f"lag_cluster{cluster_id}.png"
+
+                _plot_lag_cluster(
+                    curves,
+                    out_png,
+                    title=f"{pid} | {pair_name} | cluster {cluster_id}",
+                )
 
     run_log = [
         f"INPUT: {in_path}",
@@ -732,8 +1491,8 @@ def main() -> None:
         "",
         f"  - {out_lag_dir / 'regime_lag_summary.csv'}",
         f"  - {out_lag_single_csv}",
-        f"  - {out_lag_single_fig}",
-        f"  - {out_lag_summary_fig}",
+        f"  - {fig_lag_single_dir}",
+        f"  - {fig_lag_summary_dir}",
         "outputs:",
         f"  - {out_pca_dir / 'pca_loadings.csv'}",
         f"  - {out_pca_dir / 'pca_scores.csv'}",
@@ -742,6 +1501,16 @@ def main() -> None:
         f"  - {out_reg_dir / 'regime_segments.csv'}",
         f"  - {out_reg_dir / 'cluster_summary.csv'}",
         f"  - {fig_reg_dir / 'trajectory_clusters.png'}",
+        f"  - {out_reg_dir / 'cluster_profile_phys_raw.csv'}",
+        f"  - {out_reg_dir / 'cluster_profile_phys_zscore.csv'}",
+        f"  - {out_reg_dir / 'cluster_profile_phys_minmax.csv'}",
+        f"  - {fig_profile_dir / 'cluster_profile_phys_heatmap_zscore.png'}",
+        f"  - {fig_profile_dir / 'cluster_profile_phys_radar_minmax.png'}",
+        f"  - {fig_profile_dir / 'cluster_profile_bio_heatmap_zscore.png'}",
+        f"  - {fig_profile_dir / 'cluster_profile_bio_radar_minmax.png'}",
+        f"  - {out_reg_dir / 'cluster_profile_phys_radar.csv'}",
+        f"  - {fig_profile_dir / 'cluster_profile_phys_radar_relative.png'}",
+        f"  - {fig_bestlag_dir}",
     ]
     _write_text(out_reg_dir / "run_log.txt", run_log)
 
@@ -758,16 +1527,48 @@ if __name__ == "__main__":
 
 """
 python -m bgcd.analysis.cli_phys_regime_lag `
+  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT/300534065378180/B_window/data/master_subset_best_window.csv" `
+  --config "analysis_config/analysis_config_min_no_sal.yml" `
+  --out-root "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT" `
+  --plots-root "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots" `
+  --rot-smooth 24h `
+  --k 2 `
+  --use-pcs 1 2 3 `
+  --segment-min-duration-days 1.0 `
+  --segment-min-points 8 `
+  --merge-short-segments-points 9 `
+  --min-pairs 10 `
+  --write-single-lag-plots false `
+  --write-summary-lag-plots true
+
+
+python -m bgcd.analysis.cli_phys_regime_lag `
   --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT/300534065379230/B_window/data/master_subset_best_window.csv" `
   --config "analysis_config/analysis_config_min.yml" `
   --out-root "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT" `
   --plots-root "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots" `
-  --k 3 `
-  --use-pcs 1 2 3 `
+  --rot-smooth 24h `
+  --k 4 `
+  --use-pcs 1 2 3 4 `
   --segment-min-duration-days 1.0 `
   --segment-min-points 8 `
-  --merge-short-segments-points 4 `
+  --merge-short-segments-points 9 `
   --min-pairs 10 `
-  --write-single-lag-plots true `
+  --write-single-lag-plots false `
+  --write-summary-lag-plots true
+
+python -m bgcd.analysis.cli_phys_regime_lag `
+  --input "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT/300534065470010/B_window/data/master_subset_best_window.csv" `
+  --config "analysis_config/analysis_config_min.yml" `
+  --out-root "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/OUT" `
+  --plots-root "C:/Users/Jacopo/OneDrive - CNR/BGC-SVP/plots" `
+  --rot-smooth 24h `
+  --k 4 `
+  --use-pcs 1 2 3 4 `
+  --segment-min-duration-days 1.0 `
+  --segment-min-points 8 `
+  --merge-short-segments-points 9 `
+  --min-pairs 10 `
+  --write-single-lag-plots false `
   --write-summary-lag-plots true
 """

@@ -31,7 +31,7 @@ analysis:
   phys_vars:
     - sst_c
     - wspd
-    - okubo_weiss
+    # - okubo_weiss
     - rotation_index
 
   bio_vars:
